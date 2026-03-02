@@ -31,6 +31,7 @@ from ..tmux_manager import tmux_manager
 from ..utils import task_done_callback
 from .callback_data import (
     CB_STATUS_ESC,
+    CB_STATUS_RECALL,
     CB_STATUS_NOTIFY,
     CB_STATUS_SCREENSHOT,
     NOTIFY_MODE_ICONS,
@@ -51,19 +52,19 @@ def build_status_keyboard(
     window_id: str, history: list[str] | None = None
 ) -> InlineKeyboardMarkup:
     """Build inline keyboard for status messages: [↑ cmd] row + [Esc] [Screenshot] [Bell]."""
-    from .command_history import INLINE_QUERY_MAX, truncate_for_display
+    from .command_history import truncate_for_display
 
     rows: list[list[InlineKeyboardButton]] = []
 
     # History recall row (up to 2 buttons)
     if history:
         hist_row: list[InlineKeyboardButton] = []
-        for cmd in history[:2]:
+        for idx, cmd in enumerate(history[:2]):
             label = truncate_for_display(cmd, 20)
-            query = cmd[:INLINE_QUERY_MAX]
             hist_row.append(
                 InlineKeyboardButton(
-                    f"\u2191 {label}", switch_inline_query_current_chat=query
+                    f"\u2191 {label}",
+                    callback_data=f"{CB_STATUS_RECALL}{window_id}:{idx}"[:64],
                 )
             )
         rows.append(hist_row)

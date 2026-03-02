@@ -2,6 +2,7 @@
 
 Handles inline keyboard callbacks for screenshot UI and status message buttons:
   - CB_SCREENSHOT_REFRESH: Refresh an existing screenshot
+  - CB_STATUS_RECALL: Send one of the two recent commands from status row
   - CB_STATUS_ESC: Send Escape key from status message
   - CB_STATUS_SCREENSHOT: Take a screenshot from status message
   - CB_KEYS_PREFIX: Send a quick key from screenshot keyboard
@@ -32,6 +33,7 @@ from .callback_data import (
     CB_PANE_SCREENSHOT,
     CB_SCREENSHOT_REFRESH,
     CB_STATUS_ESC,
+    CB_STATUS_RECALL,
     CB_STATUS_NOTIFY,
     CB_STATUS_SCREENSHOT,
     NOTIFY_MODE_LABELS,
@@ -153,6 +155,8 @@ async def handle_screenshot_callback(
     """Handle screenshot, status button, and quick-key callbacks."""
     if data.startswith(CB_SCREENSHOT_REFRESH):
         await _handle_refresh(query, user_id, data)
+    elif data.startswith(CB_STATUS_RECALL):
+        await _handle_status_recall(query, user_id, data, update)
     elif data.startswith(CB_STATUS_ESC):
         await _handle_status_esc(query, user_id, data)
     elif data.startswith(CB_STATUS_SCREENSHOT):
@@ -214,6 +218,52 @@ async def _handle_status_esc(query: CallbackQuery, user_id: int, data: str) -> N
         await query.answer("\u238b Sent Escape")
     else:
         await query.answer("Window not found", show_alert=True)
+
+
+async def _handle_status_recall(
+    query: CallbackQuery, user_id: int, data: str, update: Update
+) -> None:
+    """Handle CB_STATUS_RECALL: send one of the last shown commands directly."""
+    rest = data[len(CB_STATUS_RECALL) :]
+    if ":" not in rest:
+        await query.answer("Invalid data")
+        return
+    window_id, idx_raw = rest.rsplit(":", 1)
+    try:
+        idx = int(idx_raw)
+    except ValueError:
+        await query.answer("Invalid data")
+        return
+    if idx < 0:
+        await query.answer("Invalid data")
+        return
+    if not user_owns_window(user_id, window_id):
+        await query.answer("Not your session", show_alert=True)
+        return
+
+    thread_id = get_thread_id(update)
+    if thread_id is None:
+        await query.answer("Use in a topic", show_alert=True)
+        return
+    if session_manager.resolve_window_for_thread(user_id, thread_id) != window_id:
+        await query.answer("Stale status button", show_alert=True)
+        return
+
+    from .command_history import get_history, record_command
+
+    history = get_history(user_id, thread_id, limit=idx + 1)
+    if idx >= len(history):
+        await query.answer("Command not found", show_alert=True)
+        return
+
+    command = history[idx]
+    ok, err = await session_manager.send_to_window(window_id, command)
+    if not ok:
+        await query.answer(err or "Failed to send command", show_alert=True)
+        return
+
+    record_command(user_id, thread_id, command)
+    await query.answer("\u21a9 Sent")
 
 
 async def _handle_status_screenshot(

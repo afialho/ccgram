@@ -7,6 +7,7 @@ import pytest
 from ccbot.handlers.callback_data import (
     CB_STATUS_ESC,
     CB_STATUS_NOTIFY,
+    CB_STATUS_RECALL,
     CB_STATUS_SCREENSHOT,
     NOTIFY_MODE_ICONS,
 )
@@ -57,8 +58,8 @@ class TestBuildStatusKeyboard:
     def test_history_adds_row(self) -> None:
         kb = build_status_keyboard("@0", history=["hello", "world"])
         assert len(kb.inline_keyboard) == 2
-        assert kb.inline_keyboard[0][0].switch_inline_query_current_chat == "hello"
-        assert kb.inline_keyboard[0][1].switch_inline_query_current_chat == "world"
+        assert kb.inline_keyboard[0][0].callback_data == f"{CB_STATUS_RECALL}@0:0"
+        assert kb.inline_keyboard[0][1].callback_data == f"{CB_STATUS_RECALL}@0:1"
 
     def test_history_label_truncated(self) -> None:
         long_cmd = "a" * 30
@@ -76,10 +77,9 @@ class TestBuildStatusKeyboard:
         kb = build_status_keyboard("@0", history=[])
         assert len(kb.inline_keyboard) == 1
 
-    def test_history_query_clamped_to_inline_limit(self) -> None:
-        from ccbot.handlers.command_history import INLINE_QUERY_MAX
-
-        long_cmd = "x" * 300
-        kb = build_status_keyboard("@0", history=[long_cmd])
+    def test_history_callback_data_truncated_to_64_bytes(self) -> None:
+        long_id = "@" + "x" * 60
+        kb = build_status_keyboard(long_id, history=["cmd"])
         btn = kb.inline_keyboard[0][0]
-        assert len(btn.switch_inline_query_current_chat) == INLINE_QUERY_MAX
+        assert len(btn.callback_data) == 64
+        assert btn.callback_data.startswith(CB_STATUS_RECALL)
