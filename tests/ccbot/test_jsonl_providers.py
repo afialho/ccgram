@@ -5,14 +5,57 @@ builtin command sets, capability flags, and shared JSONL parsing edge cases.
 """
 
 import json
+import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from ccbot.providers._jsonl import extract_content_blocks, parse_jsonl_line
-from ccbot.providers.codex import CodexProvider
+from ccbot.providers.base import EXPANDABLE_QUOTE_START
+from ccbot.providers.codex import (
+    CodexProvider,
+    _format_codex_tool_result,
+    _resolve_pending,
+)
 from ccbot.providers.gemini import GeminiProvider
+
+# ── Pending resolution helper ────────────────────────────────────────────
+
+
+class TestResolvePending:
+    """Unit tests for the shared _resolve_pending helper."""
+
+    @pytest.mark.parametrize(
+        "pending_value, expected",
+        [
+            pytest.param(("shell", "shell"), ("shell", "shell"), id="tuple"),
+            pytest.param("shell", ("shell", "shell"), id="legacy_string"),
+        ],
+    )
+    def test_known_formats(
+        self,
+        pending_value: object,
+        expected: tuple[str | None, str | None],
+    ) -> None:
+        pending: dict[str, object] = {"fc1": pending_value}
+        assert _resolve_pending("fc1", pending) == expected
+        assert "fc1" not in pending
+
+    def test_missing_key_returns_nones(self) -> None:
+        pending: dict[str, object] = {}
+        assert _resolve_pending("missing", pending) == (None, None)
+
+    def test_empty_call_id_returns_nones(self) -> None:
+        pending: dict[str, object] = {"": ("a", "b")}
+        assert _resolve_pending("", pending) == (None, None)
+        assert "" in pending
+
+    def test_non_string_call_id_returns_nones(self) -> None:
+        pending: dict[str, object] = {}
+        assert _resolve_pending(42, pending) == (None, None)
+
 
 # ── Shared hookless-provider tests (parametrized) ────────────────────────
 
@@ -183,7 +226,7 @@ class TestCodexTranscriptParsing:
         assert messages[0].content_type == "tool_use"
         assert messages[0].tool_use_id == "fc1"
         assert messages[0].tool_name == "exec_command"
-        assert "fc1" in pending
+        assert pending["fc1"] == ("exec_command", "exec_command")
 
     def test_function_call_output_clears_pending(self) -> None:
         codex = CodexProvider()
@@ -198,12 +241,32 @@ class TestCodexTranscriptParsing:
             }
         ]
         messages, pending = codex.parse_transcript_entries(
-            entries, {"fc1": "exec_command"}
+            entries, {"fc1": ("exec_command", "exec_command")}
         )
         assert len(messages) == 1
         assert messages[0].content_type == "tool_result"
         assert messages[0].tool_use_id == "fc1"
-        assert messages[0].text == "ok"
+        # exec_command output always gets stats + expandable quote
+        assert "1 lines" in messages[0].text
+        assert "fc1" not in pending
+
+    def test_function_call_output_legacy_string_pending(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "fc1",
+                    "output": "result text",
+                },
+            }
+        ]
+        messages, pending = codex.parse_transcript_entries(
+            entries, {"fc1": "some_tool"}
+        )
+        assert len(messages) == 1
+        assert messages[0].content_type == "tool_result"
         assert "fc1" not in pending
 
     def test_request_user_input_maps_to_ask_user_question(self) -> None:
@@ -271,6 +334,424 @@ class TestCodexTranscriptParsing:
             },
         }
         assert codex.is_user_transcript_entry(entry) is False
+
+
+class TestFormatCodexToolResult:
+    """Unit tests for _format_codex_tool_result: stats, quotes, and apply_patch."""
+
+    @pytest.mark.parametrize(
+        "tool_name, text, expect_quote",
+        [
+            pytest.param(
+                "shell", "line1\nline2\nline3", True, id="shell_always_quoted"
+            ),
+            pytest.param(
+                "exec_command", "a\nb\nc\nd\ne", True, id="exec_command_always_quoted"
+            ),
+            pytest.param("read_file", "short", False, id="short_inline"),
+            pytest.param("read_file", "a\nb\nc", False, id="3_lines_at_threshold"),
+            pytest.param("read_file", "a\nb\nc\nd", True, id="4_lines_above_threshold"),
+        ],
+    )
+    def test_quote_threshold(
+        self, tool_name: str, text: str, expect_quote: bool
+    ) -> None:
+        result = _format_codex_tool_result(tool_name, text)
+        if expect_quote:
+            assert EXPANDABLE_QUOTE_START in result
+            line_count = text.count("\n") + 1
+            assert f"{line_count} lines" in result
+        else:
+            assert EXPANDABLE_QUOTE_START not in result
+
+    def test_long_non_shell_gets_stats_and_quote(self) -> None:
+        text = "\n".join(f"line {i}" for i in range(10))
+        result = _format_codex_tool_result("read_file", text)
+        assert "10 lines" in result
+        assert EXPANDABLE_QUOTE_START in result
+
+    @pytest.mark.parametrize(
+        "output_json, expected",
+        [
+            pytest.param(
+                '{"output": "Patch applied successfully"}',
+                "Patch applied successfully",
+                id="output_key",
+            ),
+            pytest.param(
+                '{"result": "Changes applied"}',
+                "Changes applied",
+                id="result_key",
+            ),
+            pytest.param("not json at all", "not json at all", id="non_json_raw"),
+            pytest.param('{"status": "ok"}', '{"status": "ok"}', id="no_output_key"),
+        ],
+    )
+    def test_apply_patch_extraction(self, output_json: str, expected: str) -> None:
+        assert _format_codex_tool_result("apply_patch", output_json) == expected
+
+    def test_empty_output_returns_done(self) -> None:
+        assert _format_codex_tool_result("shell", "") == "Done"
+
+
+class TestCodexCustomToolCall:
+    """Tests for custom_tool_call and custom_tool_call_output parsing."""
+
+    def test_apply_patch_counts_update_files(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "ct1",
+                    "input": (
+                        "*** Update File: src/foo.py\n"
+                        "--- before\n+++ after\n"
+                        "*** Update File: src/bar.py\n"
+                        "--- before\n+++ after\n"
+                    ),
+                },
+            }
+        ]
+        messages, pending = codex.parse_transcript_entries(entries, {})
+        assert len(messages) == 1
+        assert messages[0].content_type == "tool_use"
+        assert messages[0].tool_name == "Edit"
+        assert "2 file(s)" in messages[0].text
+        assert "ct1" in pending
+
+    def test_apply_patch_counts_add_and_delete_files(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "ct1",
+                    "input": (
+                        "*** Add File: src/new.py\ncontent\n"
+                        "*** Delete File: src/old.py\n"
+                        "*** Update File: src/mod.py\n--- a\n+++ b\n"
+                    ),
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(entries, {})
+        assert "3 file(s)" in messages[0].text
+
+    def test_non_apply_patch_uses_input_as_summary(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "some_other_tool",
+                    "call_id": "ct1",
+                    "input": "do something",
+                },
+            }
+        ]
+        messages, pending = codex.parse_transcript_entries(entries, {})
+        assert messages[0].tool_name == "some_other_tool"
+        assert "do something" in messages[0].text
+        assert pending["ct1"] == ("some_other_tool", "some_other_tool")
+
+    def test_empty_call_id_not_stored_in_pending(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "",
+                    "input": "*** Update File: f.py\n",
+                },
+            }
+        ]
+        messages, pending = codex.parse_transcript_entries(entries, {})
+        assert len(messages) == 1
+        assert pending == {}
+        assert messages[0].tool_use_id is None
+
+    def test_long_input_truncated_in_summary(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "unknown_tool",
+                    "call_id": "ct1",
+                    "input": "x" * 300,
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(entries, {})
+        assert "..." in messages[0].text
+        assert len(messages[0].text) < 300
+
+
+class TestCustomToolCallOutput:
+    """Tests for custom_tool_call_output parsing and formatting."""
+
+    def test_apply_patch_output_extracted(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct1",
+                    "output": '{"output": "Applied successfully"}',
+                },
+            }
+        ]
+        messages, pending = codex.parse_transcript_entries(
+            entries, {"ct1": ("apply_patch", "Edit")}
+        )
+        assert messages[0].content_type == "tool_result"
+        assert messages[0].text == "Applied successfully"
+        assert "ct1" not in pending
+
+    def test_shell_output_gets_quote(self) -> None:
+        codex = CodexProvider()
+        long_output = "\n".join(f"line {i}" for i in range(20))
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct2",
+                    "output": long_output,
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(
+            entries, {"ct2": ("shell", "shell")}
+        )
+        assert EXPANDABLE_QUOTE_START in messages[0].text
+
+    def test_dict_output_with_output_key(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct1",
+                    "output": {"output": "dict result"},
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(
+            entries, {"ct1": ("apply_patch", "Edit")}
+        )
+        assert messages[0].text == "dict result"
+
+    def test_no_pending_match_returns_raw_output(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "unknown",
+                    "output": "some output",
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(entries, {})
+        assert messages[0].text == "some output"
+        assert messages[0].tool_name is None
+
+    def test_empty_output_returns_done(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct1",
+                    "output": "",
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(
+            entries, {"ct1": ("apply_patch", "Edit")}
+        )
+        assert messages[0].text == "Done"
+
+    def test_legacy_string_pending_compat(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct1",
+                    "output": "result",
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(entries, {"ct1": "shell"})
+        assert messages[0].tool_name == "shell"
+
+
+class TestCodexToolCallIntegration:
+    """Integration tests: full transcript flows through parse_transcript_entries."""
+
+    def test_function_call_then_output_shell_formatted(self) -> None:
+
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "fc1",
+                    "arguments": '{"cmd": "ls -la"}',
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "fc1",
+                    "output": "total 42\ndrwxr-xr-x  5 user group  160 Jan  1 00:00 .\ndrwxr-xr-x 10 user group  320 Jan  1 00:00 ..",
+                },
+            },
+        ]
+        messages, pending = codex.parse_transcript_entries(entries, {})
+        assert len(messages) == 2
+        assert messages[0].content_type == "tool_use"
+        assert messages[0].tool_name == "shell"
+        assert messages[1].content_type == "tool_result"
+        assert "3 lines" in messages[1].text
+        assert EXPANDABLE_QUOTE_START in messages[1].text
+        assert pending == {}
+
+    def test_custom_tool_call_then_output_roundtrip(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "ct1",
+                    "input": "*** Update File: src/main.py\n--- a\n+++ b\n",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct1",
+                    "output": '{"output": "Patch applied"}',
+                },
+            },
+        ]
+        messages, pending = codex.parse_transcript_entries(entries, {})
+        assert len(messages) == 2
+        assert messages[0].content_type == "tool_use"
+        assert messages[0].tool_name == "Edit"
+        assert "1 file(s)" in messages[0].text
+        assert messages[1].content_type == "tool_result"
+        assert messages[1].text == "Patch applied"
+        assert messages[1].tool_name == "Edit"
+        assert pending == {}
+
+    def test_mixed_text_custom_and_function_calls(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Let me fix that."}],
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "ct1",
+                    "input": "*** Update File: f.py\n",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "ct1",
+                    "output": '{"output": "Done"}',
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "fc1",
+                    "arguments": '{"cmd": "make test"}',
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "fc1",
+                    "output": "tests passed",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "All done!"}],
+                },
+            },
+        ]
+        messages, pending = codex.parse_transcript_entries(entries, {})
+        assert len(messages) == 6
+        types = [m.content_type for m in messages]
+        assert types == [
+            "text",
+            "tool_use",
+            "tool_result",
+            "tool_use",
+            "tool_result",
+            "text",
+        ]
+        assert messages[0].text == "Let me fix that."
+        assert messages[5].text == "All done!"
+        assert pending == {}
+
+    def test_function_call_output_without_pending_no_formatting(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "orphan",
+                    "output": "some text",
+                },
+            }
+        ]
+        messages, _ = codex.parse_transcript_entries(entries, {})
+        assert len(messages) == 1
+        assert messages[0].text == "some text"
+        assert messages[0].tool_name is None
 
 
 class TestCodexTerminalStatus:
@@ -716,26 +1197,23 @@ class TestGeminiMtimeCache:
 # ── Codex transcript discovery ─────────────────────────────────────────
 
 
+def _write_codex_session(
+    sessions_dir: Path, date_parts: str, name: str, session_id: str, cwd: str
+) -> Path:
+    """Write a minimal Codex transcript file and return its path."""
+    day_dir = sessions_dir / date_parts
+    day_dir.mkdir(parents=True, exist_ok=True)
+    fpath = day_dir / f"{name}.jsonl"
+    meta = {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}
+    fpath.write_text(json.dumps(meta) + "\n")
+    return fpath
+
+
 class TestCodexDiscoverTranscript:
-    def _write_session(
-        self, sessions_dir: Path, date_parts: str, name: str, session_id: str, cwd: str
-    ) -> Path:
-        """Write a minimal Codex transcript file and return its path."""
-        day_dir = sessions_dir / date_parts
-        day_dir.mkdir(parents=True, exist_ok=True)
-        fpath = day_dir / f"{name}.jsonl"
-        meta = json.dumps(
-            {
-                "type": "session_meta",
-                "payload": {"id": session_id, "cwd": cwd},
-            }
-        )
-        fpath.write_text(meta + "\n")
-        return fpath
 
     def test_finds_matching_transcript(self, tmp_path: Path) -> None:
         sessions_dir = tmp_path / ".codex" / "sessions"
-        fpath = self._write_session(
+        fpath = _write_codex_session(
             sessions_dir, "2026/03/02", "test-session", "uuid-abc", "/my/project"
         )
         codex = CodexProvider()
@@ -749,7 +1227,7 @@ class TestCodexDiscoverTranscript:
 
     def test_returns_none_when_no_cwd_match(self, tmp_path: Path) -> None:
         sessions_dir = tmp_path / ".codex" / "sessions"
-        self._write_session(
+        _write_codex_session(
             sessions_dir, "2026/03/02", "test-session", "uuid-abc", "/other/project"
         )
         codex = CodexProvider()
@@ -764,16 +1242,14 @@ class TestCodexDiscoverTranscript:
         assert event is None
 
     def test_picks_most_recent_by_mtime(self, tmp_path: Path) -> None:
-        import os
-        import time
 
         sessions_dir = tmp_path / ".codex" / "sessions"
-        old = self._write_session(
+        old = _write_codex_session(
             sessions_dir, "2026/03/01", "old", "uuid-old", "/my/project"
         )
         # Ensure mtime ordering
         time.sleep(0.05)
-        self._write_session(
+        _write_codex_session(
             sessions_dir, "2026/03/02", "new", "uuid-new", "/my/project"
         )
         # Make old file explicitly older
@@ -807,17 +1283,16 @@ class TestCodexDiscoverTranscript:
 
     def test_skips_empty_session_id(self, tmp_path: Path) -> None:
         sessions_dir = tmp_path / ".codex" / "sessions"
-        self._write_session(sessions_dir, "2026/03/02", "no-id", "", "/my/project")
+        _write_codex_session(sessions_dir, "2026/03/02", "no-id", "", "/my/project")
         codex = CodexProvider()
         with patch.object(Path, "home", return_value=tmp_path):
             event = codex.discover_transcript("/my/project", "ccbot:@7")
         assert event is None
 
     def test_skips_stale_transcript(self, tmp_path: Path) -> None:
-        import os
 
         sessions_dir = tmp_path / ".codex" / "sessions"
-        fpath = self._write_session(
+        fpath = _write_codex_session(
             sessions_dir, "2026/03/01", "old-session", "uuid-old", "/my/project"
         )
         old_time = fpath.stat().st_mtime - 300
@@ -829,18 +1304,16 @@ class TestCodexDiscoverTranscript:
         assert event is None
 
     def test_matches_fresh_transcript_only(self, tmp_path: Path) -> None:
-        import os
-        import time
 
         sessions_dir = tmp_path / ".codex" / "sessions"
-        stale = self._write_session(
+        stale = _write_codex_session(
             sessions_dir, "2026/03/01", "stale", "uuid-stale", "/my/project"
         )
         old_time = stale.stat().st_mtime - 300
         os.utime(stale, (old_time, old_time))
 
         time.sleep(0.05)
-        self._write_session(
+        _write_codex_session(
             sessions_dir, "2026/03/02", "fresh", "uuid-fresh", "/my/project"
         )
 
@@ -852,21 +1325,10 @@ class TestCodexDiscoverTranscript:
 
 
 class TestCodexDiscoverTranscriptMaxAge:
-    def _write_session(
-        self, sessions_dir: Path, date_parts: str, name: str, session_id: str, cwd: str
-    ) -> Path:
-        day_dir = sessions_dir / date_parts
-        day_dir.mkdir(parents=True, exist_ok=True)
-        fpath = day_dir / f"{name}.jsonl"
-        meta = {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}
-        fpath.write_text(json.dumps(meta) + "\n")
-        return fpath
-
     def test_max_age_zero_ignores_staleness(self, tmp_path: Path) -> None:
-        import os
 
         sessions_dir = tmp_path / ".codex" / "sessions"
-        fpath = self._write_session(
+        fpath = _write_codex_session(
             sessions_dir, "2026/03/01", "old-session", "uuid-old", "/my/project"
         )
         old_time = fpath.stat().st_mtime - 300
@@ -879,10 +1341,9 @@ class TestCodexDiscoverTranscriptMaxAge:
         assert event.session_id == "uuid-old"
 
     def test_max_age_none_uses_default(self, tmp_path: Path) -> None:
-        import os
 
         sessions_dir = tmp_path / ".codex" / "sessions"
-        fpath = self._write_session(
+        fpath = _write_codex_session(
             sessions_dir, "2026/03/01", "old-session", "uuid-old", "/my/project"
         )
         old_time = fpath.stat().st_mtime - 300
@@ -894,10 +1355,9 @@ class TestCodexDiscoverTranscriptMaxAge:
         assert event is None
 
     def test_explicit_max_age_respected(self, tmp_path: Path) -> None:
-        import os
 
         sessions_dir = tmp_path / ".codex" / "sessions"
-        fpath = self._write_session(
+        fpath = _write_codex_session(
             sessions_dir, "2026/03/01", "session", "uuid-abc", "/my/project"
         )
         old_time = fpath.stat().st_mtime - 200

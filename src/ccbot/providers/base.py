@@ -30,6 +30,16 @@ RESUME_ID_RE = re.compile(r"^[\w-]+$")
 EXPANDABLE_QUOTE_START = "\x02EXPQUOTE_START\x02"
 EXPANDABLE_QUOTE_END = "\x02EXPQUOTE_END\x02"
 
+
+def format_expandable_quote(text: str) -> str:
+    """Wrap text with sentinel markers for a Telegram expandable blockquote.
+
+    The actual MarkdownV2 formatting (> prefix, || suffix, escaping) is done
+    in convert_markdown() after telegramify processes the surrounding content.
+    """
+    return f"{EXPANDABLE_QUOTE_START}{text}{EXPANDABLE_QUOTE_END}"
+
+
 # ── Event types ──────────────────────────────────────────────────────────
 
 

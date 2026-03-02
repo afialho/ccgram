@@ -105,7 +105,7 @@ def _format_edit_prompt(lines: list[str]) -> str:
 
     if previews:
         out.append("Preview:")
-        out.extend(f"  {line}" for line in previews[:_MAX_PREVIEW_LINES])
+        out.extend(f"  {line}" for line in previews)
     elif had_diff_blob:
         out.append("Diff preview omitted (wrapped output).")
 
@@ -166,8 +166,11 @@ def _count_changes(lines: list[str]) -> tuple[int, int]:
     return added, removed
 
 
+_HEAD_TAIL_LINES = 2
+
+
 def _extract_previews(lines: list[str]) -> list[str]:
-    previews: list[str] = []
+    all_previews: list[str] = []
     seen: set[str] = set()
     for line in lines:
         stripped = line.strip()
@@ -175,22 +178,26 @@ def _extract_previews(lines: list[str]) -> list[str]:
             continue
 
         if stripped.startswith("+") and not stripped.startswith("+++"):
-            _push_preview(previews, seen, _shorten(stripped))
+            _push_preview(all_previews, seen, _shorten(stripped))
             continue
         if stripped.startswith("-") and not stripped.startswith("---"):
-            _push_preview(previews, seen, _shorten(stripped))
+            _push_preview(all_previews, seen, _shorten(stripped))
             continue
 
         for match in _SIDE_BY_SIDE_MINUS_RE.findall(line):
             text = _shorten(f"- {match.strip()}")
-            _push_preview(previews, seen, text)
+            _push_preview(all_previews, seen, text)
         for match in _SIDE_BY_SIDE_PLUS_RE.findall(line):
             text = _shorten(f"+ {match.strip()}")
-            _push_preview(previews, seen, text)
+            _push_preview(all_previews, seen, text)
 
-        if len(previews) >= _MAX_PREVIEW_LINES:
-            break
-    return previews[:_MAX_PREVIEW_LINES]
+    if len(all_previews) <= _MAX_PREVIEW_LINES:
+        return all_previews
+
+    head = all_previews[:_HEAD_TAIL_LINES]
+    tail = all_previews[-_HEAD_TAIL_LINES:]
+    omitted = len(all_previews) - _HEAD_TAIL_LINES * 2
+    return head + [f"... ({omitted} more lines)"] + tail
 
 
 def _push_preview(previews: list[str], seen: set[str], text: str) -> None:

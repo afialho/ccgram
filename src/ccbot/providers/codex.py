@@ -26,6 +26,7 @@ from ccbot.providers.base import (
     ProviderCapabilities,
     SessionStartEvent,
     StatusUpdate,
+    format_expandable_quote,
 )
 from ccbot.terminal_parser import UI_PATTERNS, extract_interactive_content
 
@@ -44,9 +45,44 @@ _CODEX_BUILTINS: dict[str, str] = {
 
 _MAX_TOOL_SUMMARY = 200
 _TOOL_NAME_ALIASES: dict[str, str] = {
-    # Codex's question UI tool is equivalent to Claude's AskUserQuestion flow.
     "request_user_input": "AskUserQuestion",
+    "apply_patch": "Edit",
 }
+
+# Minimum line count to trigger stats + expandable quote for tool results.
+_TOOL_RESULT_QUOTE_THRESHOLD = 3
+
+
+def _format_codex_tool_result(raw_tool_name: str, output_text: str) -> str:
+    """Format a Codex tool result with stats summary and expandable quote.
+
+    Mirrors Claude's ``TranscriptParser._format_tool_result_text`` behaviour:
+    shell/exec output gets ``N lines`` + expandable quote; short outputs stay inline.
+    """
+    if not output_text:
+        return "Done"
+    line_count = output_text.count("\n") + 1
+
+    if raw_tool_name in ("exec_command", "shell"):
+        stats = f"  \u23bf  {line_count} lines"
+        return stats + "\n" + format_expandable_quote(output_text)
+
+    if raw_tool_name == "apply_patch":
+        try:
+            parsed = json.loads(output_text)
+        except json.JSONDecodeError, TypeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            result_text = parsed.get("output", "") or parsed.get("result", "")
+            if isinstance(result_text, str) and result_text:
+                return result_text
+        return output_text
+
+    if line_count > _TOOL_RESULT_QUOTE_THRESHOLD:
+        stats = f"  \u23bf  {line_count} lines"
+        return stats + "\n" + format_expandable_quote(output_text)
+
+    return output_text
 
 
 def _canonical_tool_name(name: str) -> str:
@@ -194,6 +230,109 @@ def _format_request_user_input_result(output_text: str) -> str:
     return output_text
 
 
+def _parse_custom_tool_call(
+    payload: dict[str, Any],
+    pending: dict[str, Any],
+) -> tuple[list[AgentMessage], dict[str, Any]]:
+    """Parse a custom_tool_call payload (e.g. apply_patch)."""
+    raw_name_value = payload.get("name", "unknown")
+    raw_name = (
+        raw_name_value if isinstance(raw_name_value, str) else str(raw_name_value)
+    )
+    tool_name = _canonical_tool_name(raw_name)
+    call_id = payload.get("call_id", "")
+    if isinstance(call_id, str) and call_id:
+        pending[call_id] = (raw_name, tool_name)
+
+    # For apply_patch, summarize by counting file updates in the input string.
+    input_text = payload.get("input", "")
+    summary = ""
+    if raw_name == "apply_patch" and isinstance(input_text, str):
+        file_count = input_text.count("*** Update File:")
+        file_count += input_text.count("*** Add File:")
+        file_count += input_text.count("*** Delete File:")
+        if file_count:
+            summary = f"{file_count} file(s)"
+    if not summary and isinstance(input_text, str) and input_text:
+        summary = input_text[:_MAX_TOOL_SUMMARY]
+        if len(input_text) > _MAX_TOOL_SUMMARY:
+            summary += "..."
+
+    text = f"**{tool_name}** `{summary}`" if summary else f"**{tool_name}**"
+    return (
+        [
+            AgentMessage(
+                text=text,
+                role="assistant",
+                content_type="tool_use",
+                tool_use_id=call_id or None,
+                tool_name=tool_name,
+            )
+        ],
+        pending,
+    )
+
+
+def _resolve_pending(
+    call_id: Any,
+    pending: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Pop a pending tool entry and return (raw_name, tool_name).
+
+    Handles both current tuple format and legacy string values.
+    """
+    resolved = (
+        pending.pop(call_id, None) if isinstance(call_id, str) and call_id else None
+    )
+    if isinstance(resolved, tuple):
+        return resolved[0], resolved[1]
+    if isinstance(resolved, str):
+        return resolved, resolved
+    return None, None
+
+
+def _parse_custom_tool_call_output(
+    payload: dict[str, Any],
+    pending: dict[str, Any],
+) -> tuple[list[AgentMessage], dict[str, Any]]:
+    """Parse a custom_tool_call_output payload."""
+    call_id = payload.get("call_id", "")
+    raw_name, tool_name = _resolve_pending(call_id, pending)
+
+    # Output is typically JSON-wrapped: {"output": "..."}.
+    raw_output = payload.get("output", "")
+    output_text = ""
+    if isinstance(raw_output, str):
+        try:
+            parsed = json.loads(raw_output)
+        except json.JSONDecodeError, TypeError:
+            parsed = None
+        if isinstance(parsed, dict) and "output" in parsed:
+            output_text = str(parsed["output"]).strip()
+        else:
+            output_text = raw_output.strip()
+    elif isinstance(raw_output, dict) and "output" in raw_output:
+        output_text = str(raw_output["output"]).strip()
+
+    if raw_name and output_text:
+        output_text = _format_codex_tool_result(raw_name, output_text)
+    if not output_text:
+        output_text = "Done"
+
+    return (
+        [
+            AgentMessage(
+                text=output_text,
+                role="assistant",
+                content_type="tool_result",
+                tool_use_id=call_id if isinstance(call_id, str) else None,
+                tool_name=tool_name,
+            )
+        ],
+        pending,
+    )
+
+
 def _parse_codex_response_item(
     payload: dict[str, Any],
     pending: dict[str, Any],
@@ -204,6 +343,10 @@ def _parse_codex_response_item(
         return _parse_function_call(payload, pending)
     if payload_type == "function_call_output":
         return _parse_function_call_output(payload, pending)
+    if payload_type == "custom_tool_call":
+        return _parse_custom_tool_call(payload, pending)
+    if payload_type == "custom_tool_call_output":
+        return _parse_custom_tool_call_output(payload, pending)
     return _parse_response_message(payload, pending)
 
 
@@ -219,7 +362,7 @@ def _parse_function_call(
     tool_name = _canonical_tool_name(raw_name)
     call_id = payload.get("call_id", "")
     if isinstance(call_id, str) and call_id:
-        pending[call_id] = tool_name
+        pending[call_id] = (raw_name, tool_name)
     args = _parse_tool_arguments(payload.get("arguments", {}))
     return (
         [
@@ -241,16 +384,13 @@ def _parse_function_call_output(
 ) -> tuple[list[AgentMessage], dict[str, Any]]:
     """Parse a function_call_output payload into a tool_result AgentMessage."""
     call_id = payload.get("call_id", "")
-    resolved_name = (
-        pending.pop(call_id, None) if isinstance(call_id, str) and call_id else None
-    )
-    tool_name = (
-        resolved_name if isinstance(resolved_name, str) and resolved_name else None
-    )
+    raw_name, tool_name = _resolve_pending(call_id, pending)
 
     output_text = _extract_tool_output_text(payload.get("output", ""))
     if tool_name == "AskUserQuestion":
         output_text = _format_request_user_input_result(output_text)
+    elif raw_name and output_text:
+        output_text = _format_codex_tool_result(raw_name, output_text)
     if not output_text:
         output_text = "Done"
 

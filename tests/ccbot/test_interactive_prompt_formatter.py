@@ -1,6 +1,19 @@
 """Tests for interactive prompt text formatting."""
 
+import pytest
+
 from ccbot.interactive_prompt_formatter import format_codex_interactive_prompt
+
+
+def _make_edit_prompt(diff_lines: list[str]) -> str:
+    """Build a minimal edit prompt with given diff lines."""
+    return (
+        "Do you want to make this edit to foo.py?\n"
+        + "\n".join(diff_lines)
+        + "\n"
+        + "\u203a 1. Yes, proceed (y)\n"
+        + "Press enter to confirm\n"
+    )
 
 
 class TestFormatCodexInteractivePrompt:
@@ -60,3 +73,90 @@ class TestFormatCodexInteractivePrompt:
         twice = format_codex_interactive_prompt(once, "SelectionUI")
 
         assert once == twice
+
+
+class TestExtractPreviewsHeadTail:
+    def test_short_diff_shows_all_lines(self) -> None:
+        raw = _make_edit_prompt(["+ added line 1", "- removed line 1"])
+        result = format_codex_interactive_prompt(raw, "SelectionUI")
+        assert "Preview:" in result
+        assert "+ added line 1" in result
+        assert "- removed line 1" in result
+        assert "more lines" not in result
+
+    def test_long_diff_shows_head_tail_with_omitted(self) -> None:
+        raw = _make_edit_prompt([f"+ added line {i}" for i in range(8)])
+        result = format_codex_interactive_prompt(raw, "SelectionUI")
+        assert "Preview:" in result
+        assert "+ added line 0" in result
+        assert "+ added line 1" in result
+        assert "more lines" in result
+        assert "+ added line 6" in result
+        assert "+ added line 7" in result
+        assert "+ added line 3" not in result
+
+    @pytest.mark.parametrize(
+        "line_count, expect_truncation",
+        [
+            pytest.param(4, False, id="4_lines_no_truncation"),
+            pytest.param(5, True, id="5_lines_triggers_truncation"),
+        ],
+    )
+    def test_truncation_boundary(
+        self, line_count: int, expect_truncation: bool
+    ) -> None:
+        diff_lines = [f"+ line {i}" for i in range(line_count)]
+        raw = _make_edit_prompt(diff_lines)
+        result = format_codex_interactive_prompt(raw, "SelectionUI")
+
+        if expect_truncation:
+            omitted = line_count - 4
+            assert f"{omitted} more lines" in result
+            assert "+ line 0" in result
+            assert "+ line 1" in result
+            assert f"+ line {line_count - 2}" in result
+            assert f"+ line {line_count - 1}" in result
+            assert "+ line 2" not in result
+        else:
+            assert "more lines" not in result
+            for i in range(line_count):
+                assert f"+ line {i}" in result
+
+    def test_mixed_add_remove_in_head_tail(self) -> None:
+        diff_lines = (
+            ["- removed 0", "+ added 0"]
+            + [f"+ added {i}" for i in range(1, 5)]
+            + ["- removed 5", "+ added 5"]
+        )
+        raw = _make_edit_prompt(diff_lines)
+        result = format_codex_interactive_prompt(raw, "SelectionUI")
+        assert "Preview:" in result
+        assert "more lines" in result
+        assert "- removed 0" in result
+        assert "+ added 0" in result
+        assert "- removed 5" in result
+        assert "+ added 5" in result
+
+
+class TestFormatExpandableQuote:
+    def test_wraps_text_with_sentinel_markers(self) -> None:
+        from ccbot.providers.base import (
+            EXPANDABLE_QUOTE_END,
+            EXPANDABLE_QUOTE_START,
+            format_expandable_quote,
+        )
+
+        text = "some tool output\nwith multiple lines"
+        result = format_expandable_quote(text)
+        assert result.startswith(EXPANDABLE_QUOTE_START)
+        assert result.endswith(EXPANDABLE_QUOTE_END)
+        assert text in result
+
+    def test_transcript_parser_delegates_to_shared_function(self) -> None:
+        from ccbot.providers.base import format_expandable_quote
+        from ccbot.transcript_parser import TranscriptParser
+
+        text = "some tool output\nwith multiple lines"
+        assert TranscriptParser._format_expandable_quote(
+            text
+        ) == format_expandable_quote(text)
