@@ -46,6 +46,7 @@ _BOT_COMMANDS: list[tuple[str, str]] = [
     ("resume", "Browse and resume past sessions"),
     ("screenshot", "Capture terminal screenshot"),
     ("panes", "List panes in this window"),
+    ("restore", "Recover a dead topic"),
     ("sync", "Audit and fix state"),
     ("unbind", "Unbind this topic"),
     ("recall", "Recall recent commands"),
