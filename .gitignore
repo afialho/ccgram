@@ -50,3 +50,6 @@ pkg/
 
 # ralphex progress logs
 progress*.txt
+
+# Dev run lock
+.ccbot-dev-run.lock.d/
