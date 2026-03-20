@@ -95,6 +95,26 @@ class TestFormatBatchMessage:
         assert "\u23bf" in result
         assert "\u23f3" not in result
 
+    def test_subagent_label_none(self) -> None:
+        entries = [ToolBatchEntry("t1", "Read x")]
+        result = format_batch_message(entries, subagent_label=None)
+        assert "[" not in result.split("\n")[0]
+
+    def test_subagent_label_single(self) -> None:
+        entries = [ToolBatchEntry("t1", "Read x"), ToolBatchEntry("t2", "Edit y")]
+        result = format_batch_message(entries, subagent_label="\U0001f916 write-tests")
+        header = result.split("\n")[0]
+        assert "2 tool calls" in header
+        assert "[\U0001f916 write-tests]" in header
+
+    def test_subagent_label_multi(self) -> None:
+        entries = [ToolBatchEntry("t1", "Read x")]
+        label = "\U0001f916 2 subagents: write-tests, refactor"
+        result = format_batch_message(entries, subagent_label=label)
+        header = result.split("\n")[0]
+        assert "[" in header
+        assert "2 subagents" in header
+
 
 # --- _is_batch_eligible tests ---
 
@@ -703,6 +723,24 @@ class TestFlushBatch:
         await _flush_batch(bot, 1, 0)
         assert (1, 0) not in _active_batches
         bot.edit_message_text.assert_not_awaited()
+
+    @patch(
+        "ccgram.handlers.hook_events.get_subagent_names", return_value=["researcher"]
+    )
+    @patch("ccgram.handlers.message_queue.session_manager")
+    async def test_flush_includes_subagent_label(self, mock_sm, _mock_names) -> None:
+        mock_sm.resolve_chat_id.return_value = 42
+        _active_batches[(1, 0)] = ToolBatch(
+            window_id="@0",
+            thread_id=0,
+            entries=[ToolBatchEntry("t1", "Read x", "ok")],
+            telegram_msg_id=100,
+        )
+
+        bot = AsyncMock()
+        await _flush_batch(bot, 1, 0)
+        text_sent = bot.edit_message_text.call_args.kwargs["text"]
+        assert "researcher" in text_sent
 
     @patch("ccgram.handlers.message_queue.session_manager")
     async def test_flush_handles_telegram_error(self, mock_sm) -> None:
