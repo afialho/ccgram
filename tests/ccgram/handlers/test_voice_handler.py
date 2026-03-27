@@ -172,6 +172,7 @@ class TestHandleVoiceMessage:
         from ccgram.handlers import voice_handler
 
         mock_config.is_user_allowed.return_value = True
+        mock_config.whisper_autosend = False
         mock_transcriber = MagicMock()
         mock_transcriber.transcribe = AsyncMock(
             return_value=TranscriptionResult(text="do the thing", language="en")
@@ -215,6 +216,7 @@ class TestHandleVoiceMessage:
         from ccgram.handlers import voice_handler
 
         mock_config.is_user_allowed.return_value = True
+        mock_config.whisper_autosend = False
         mock_transcriber = MagicMock()
         mock_transcriber.transcribe = AsyncMock(
             return_value=TranscriptionResult(text="do the thing", language="en")
@@ -349,6 +351,150 @@ class TestHandleVoiceMessage:
 
         mock_reply.assert_called_once()
         assert "Failed to download" in mock_reply.call_args.args[1]
+
+
+class TestAutosend:
+    @patch(f"{_VH}.ack_reaction", new_callable=AsyncMock)
+    @patch(f"{_VH}.get_provider_for_window")
+    @patch(f"{_VH}._download_voice", new_callable=AsyncMock)
+    @patch(f"{_VH}.session_manager")
+    @patch(f"{_VH}.config")
+    @patch(f"{_VH}.get_transcriber")
+    @patch(f"{_VH}.safe_reply", new_callable=AsyncMock)
+    async def test_autosend_sends_directly_without_keyboard(
+        self,
+        mock_reply: AsyncMock,
+        mock_get_transcriber: MagicMock,
+        mock_config: MagicMock,
+        mock_session_manager: MagicMock,
+        mock_download: AsyncMock,
+        mock_get_provider: MagicMock,
+        mock_ack: AsyncMock,
+    ) -> None:
+        from ccgram.handlers import voice_handler
+
+        mock_config.is_user_allowed.return_value = True
+        mock_config.whisper_autosend = True
+        mock_transcriber = MagicMock()
+        mock_transcriber.transcribe = AsyncMock(
+            return_value=TranscriptionResult(text="hello world", language="en")
+        )
+        mock_get_transcriber.return_value = mock_transcriber
+        mock_session_manager.resolve_window_for_thread.return_value = "@0"
+        mock_session_manager.send_to_window = AsyncMock(return_value=(True, None))
+        mock_download.return_value = b"fake audio bytes"
+
+        mock_provider = MagicMock()
+        mock_provider.capabilities.name = "claude"
+        mock_get_provider.return_value = mock_provider
+
+        update = _make_update()
+        context = MagicMock()
+        context.user_data = {}
+
+        await voice_handler.handle_voice_message(update, context)
+
+        mock_session_manager.send_to_window.assert_called_once_with("@0", "hello world")
+        mock_ack.assert_called_once()
+        mock_reply.assert_called_once()
+        assert "🎤 hello world" == mock_reply.call_args.args[1]
+        assert VOICE_PENDING not in context.user_data
+
+    @patch(f"{_VH}.get_provider_for_window")
+    @patch(f"{_VH}._download_voice", new_callable=AsyncMock)
+    @patch(f"{_VH}.session_manager")
+    @patch(f"{_VH}.config")
+    @patch(f"{_VH}.get_transcriber")
+    @patch(f"{_VH}.safe_reply", new_callable=AsyncMock)
+    async def test_autosend_send_failure_reports_error(
+        self,
+        mock_reply: AsyncMock,
+        mock_get_transcriber: MagicMock,
+        mock_config: MagicMock,
+        mock_session_manager: MagicMock,
+        mock_download: AsyncMock,
+        mock_get_provider: MagicMock,
+    ) -> None:
+        from ccgram.handlers import voice_handler
+
+        mock_config.is_user_allowed.return_value = True
+        mock_config.whisper_autosend = True
+        mock_transcriber = MagicMock()
+        mock_transcriber.transcribe = AsyncMock(
+            return_value=TranscriptionResult(text="hello world", language="en")
+        )
+        mock_get_transcriber.return_value = mock_transcriber
+        mock_session_manager.resolve_window_for_thread.return_value = "@0"
+        mock_session_manager.send_to_window = AsyncMock(
+            return_value=(False, "window not found")
+        )
+        mock_download.return_value = b"fake audio bytes"
+
+        mock_provider = MagicMock()
+        mock_provider.capabilities.name = "claude"
+        mock_get_provider.return_value = mock_provider
+
+        await voice_handler.handle_voice_message(_make_update(), MagicMock(user_data={}))
+
+        mock_reply.assert_called_once()
+        assert "❌" in mock_reply.call_args.args[1]
+        assert "window not found" in mock_reply.call_args.args[1]
+
+    @patch(f"{_VH}.ack_reaction", new_callable=AsyncMock)
+    @patch(f"{_VH}.get_provider_for_window")
+    @patch(f"{_VH}._download_voice", new_callable=AsyncMock)
+    @patch(f"{_VH}.session_manager")
+    @patch(f"{_VH}.config")
+    @patch(f"{_VH}.get_transcriber")
+    @patch(f"{_VH}.safe_reply", new_callable=AsyncMock)
+    async def test_autosend_shell_provider_routes_through_llm(
+        self,
+        mock_reply: AsyncMock,
+        mock_get_transcriber: MagicMock,
+        mock_config: MagicMock,
+        mock_session_manager: MagicMock,
+        mock_download: AsyncMock,
+        mock_get_provider: MagicMock,
+        mock_ack: AsyncMock,
+    ) -> None:
+        from ccgram.handlers import voice_handler
+
+        mock_config.is_user_allowed.return_value = True
+        mock_config.whisper_autosend = True
+        mock_transcriber = MagicMock()
+        mock_transcriber.transcribe = AsyncMock(
+            return_value=TranscriptionResult(text="list files", language="en")
+        )
+        mock_get_transcriber.return_value = mock_transcriber
+        mock_session_manager.resolve_window_for_thread.return_value = "@0"
+        mock_download.return_value = b"fake audio bytes"
+
+        mock_provider = MagicMock()
+        mock_provider.capabilities.name = "shell"
+        mock_get_provider.return_value = mock_provider
+
+        update = _make_update()
+        context = MagicMock()
+        context.user_data = {}
+
+        with patch(
+            "ccgram.handlers.shell_commands.handle_shell_message",
+            new_callable=AsyncMock,
+        ) as mock_shell:
+            await voice_handler.handle_voice_message(update, context)
+
+            mock_shell.assert_called_once_with(
+                update.message.get_bot(),
+                100,
+                42,
+                "@0",
+                "list files",
+            )
+
+        mock_session_manager.send_to_window.assert_not_called()
+        mock_ack.assert_called_once()
+        mock_reply.assert_called_once()
+        assert "🎤 list files" == mock_reply.call_args.args[1]
 
 
 class TestHandleVoiceCallback:

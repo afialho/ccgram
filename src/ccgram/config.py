@@ -136,6 +136,9 @@ class Config:
         self.whisper_language: str = _env_with_fallback(
             "CCGRAM_WHISPER_LANGUAGE", "CCBOT_WHISPER_LANGUAGE"
         )
+        self.whisper_autosend: bool = os.getenv("CCGRAM_VOICE_AUTOSEND", "").lower() in (
+            "1", "true", "yes"
+        )
 
         # LLM command generation (shell provider)
         self.prompt_mode: str = os.getenv("CCGRAM_PROMPT_MODE", "wrap")

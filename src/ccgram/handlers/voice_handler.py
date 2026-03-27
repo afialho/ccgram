@@ -1,8 +1,9 @@
 """Voice message handler — download OGG audio, transcribe via Whisper, and present confirm keyboard.
 
 Handles Telegram voice messages by downloading the audio, transcribing it using
-the configured Whisper provider, and showing the transcription with a confirm/discard
-inline keyboard so the user can review before sending to the agent.
+the configured Whisper provider, and either showing the transcription with a
+confirm/discard inline keyboard (default) or sending it directly to the agent
+when CCGRAM_VOICE_AUTOSEND=true.
 
 Key handler:
   - handle_voice_message: main entry point for filters.VOICE
@@ -15,11 +16,12 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..config import config
+from ..providers import get_provider_for_window
 from ..session import session_manager
 from ..whisper import get_transcriber
 from ..whisper.base import TranscriptionResult, WhisperTranscriber
 from .callback_helpers import get_thread_id
-from .message_sender import safe_reply
+from .message_sender import ack_reaction, safe_reply
 from .user_state import VOICE_PENDING
 
 logger = structlog.get_logger()
@@ -85,6 +87,40 @@ async def _transcribe_audio(
     except (ValueError, RuntimeError) as e:
         await safe_reply(message, f"❌ {e}")
         return None
+
+
+async def _autosend_to_window(
+    message: Message,
+    user_id: int,
+    thread_id: int | None,
+    window_id: str,
+    text: str,
+) -> None:
+    """Send transcribed text directly to the agent without confirmation.
+
+    Used when CCGRAM_VOICE_AUTOSEND=true. Routes through the shell LLM pipeline
+    for shell-provider windows; sends directly via tmux for all other providers.
+    """
+    provider = get_provider_for_window(window_id)
+    if provider.capabilities.name == "shell" and thread_id is not None:
+        from .shell_commands import handle_shell_message
+
+        try:
+            await handle_shell_message(
+                message.get_bot(), user_id, thread_id, window_id, text
+            )
+        except (OSError, TelegramError) as exc:
+            logger.warning("Voice autosend to shell failed: %s", exc)
+            await safe_reply(message, f"❌ Failed to send: {exc}")
+            return
+    else:
+        success, err = await session_manager.send_to_window(window_id, text)
+        if not success:
+            await safe_reply(message, f"❌ {err}")
+            return
+
+    await ack_reaction(message.get_bot(), message.chat.id, message.message_id)
+    await safe_reply(message, f"🎤 {text}")
 
 
 async def _send_confirm_message(
@@ -157,4 +193,7 @@ async def handle_voice_message(
         await safe_reply(message, "⚠️ Could not transcribe audio (empty result).")
         return
 
-    await _send_confirm_message(message, result.text, context)
+    if config.whisper_autosend:
+        await _autosend_to_window(message, user.id, thread_id, window_id, result.text)
+    else:
+        await _send_confirm_message(message, result.text, context)
