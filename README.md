@@ -230,3 +230,93 @@ CCGram started as a fork of [ccbot](https://github.com/six-ddc/ccbot) by [six-dd
 ## License
 
 [MIT](LICENSE)
+
+## ccgramctl — Control Panel
+
+`ccgramctl` is a companion CLI that wraps CCGram's daemon lifecycle, tmux session management, and first-time setup into simple, memorable commands.
+
+### Install ccgramctl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/afialho/ccgram/main/scripts/install-ctl.sh | bash
+```
+
+Or manually:
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/afialho/ccgram/main/scripts/ccgramctl -o ~/.local/bin/ccgramctl
+chmod +x ~/.local/bin/ccgramctl
+```
+
+### First-Time Setup
+
+```bash
+ccgramctl setup
+```
+
+The interactive wizard walks you through everything step by step:
+
+1. **Prerequisites** — checks for Python, tmux, and Claude Code
+2. **Install CCGram** — installs from the fork via uv, pipx, or pip
+3. **Create Telegram Bot** — step-by-step BotFather instructions
+4. **Get User ID** — how to find your Telegram user ID via @userinfobot
+5. **Create Group** — how to set up a Topics-enabled group and get the group ID
+6. **Voice Transcription** — optional Whisper setup via Groq (free tier available)
+7. **Project Directory** — set the default directory for the Telegram file browser
+
+All credentials are saved to `~/.ccgram/.env` with `600` permissions.
+
+### Day-to-Day Commands
+
+```bash
+ccgramctl up          # Start the daemon
+ccgramctl down        # Stop the daemon
+ccgramctl restart     # Restart (applies config changes)
+ccgramctl status      # Show status and active sessions
+ccgramctl logs        # Attach to daemon tmux (Ctrl+B, D to detach)
+```
+
+### Session Management
+
+```bash
+ccgramctl sessions    # List active tmux windows
+ccgramctl kill <n>    # Kill a specific window by number
+```
+
+> Tip: use `/sessions` in Telegram for interactive management with kill buttons.
+
+### Configuration
+
+```bash
+ccgramctl env                     # Open ~/.ccgram/.env in your editor
+ccgramctl root ~/workspace/labs   # Change default project directory
+ccgramctl doctor                  # Run CCGram diagnostics
+ccgramctl upgrade                 # Upgrade CCGram from fork
+```
+
+### Changing the Root Directory
+
+The root directory controls where the Telegram directory browser starts when you create a new session.
+
+```bash
+ccgramctl root                        # See current root
+ccgramctl root ~/workspace/labs       # Change it
+ccgramctl restart                     # Apply
+```
+
+### How ccgramctl Works
+
+`ccgramctl` is a thin wrapper around tmux and the `ccgram` binary — no background services, no launch agents. `up` starts a detached tmux session, sources `~/.ccgram/.env`, changes to the root directory, and runs `ccgram`. `root` saves the path to `~/.ccgram/.root`, which `up` reads at launch.
+
+### ccgramctl File Locations
+
+| File | Purpose |
+|---|---|
+| `~/.local/bin/ccgramctl` | The CLI script |
+| `~/.ccgram/.env` | Tokens and configuration |
+| `~/.ccgram/.root` | Default project directory |
+
+### Compatibility
+
+macOS, Linux, and Windows (WSL). Requires bash 4+, tmux, and Python 3.10+.

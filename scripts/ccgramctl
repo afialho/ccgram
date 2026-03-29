@@ -1,0 +1,679 @@
+#!/usr/bin/env bash
+# ccgramctl — Control panel for CCGram (Telegram ↔ Claude Code bridge)
+# https://github.com/afialho/ccgram
+#
+# Usage: ccgramctl <command> [args]
+# Run 'ccgramctl help' for available commands.
+
+set -euo pipefail
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+CCGRAM_CONFIG_DIR="${CCGRAM_DIR:-$HOME/.ccgram}"
+CCGRAM_ENV_FILE="$CCGRAM_CONFIG_DIR/.env"
+CCGRAM_ROOT_FILE="$CCGRAM_CONFIG_DIR/.root"
+CCGRAM_TMUX_SESSION="ccgram-daemon"
+CCGRAM_FORK_REPO="https://github.com/afialho/ccgram.git"
+VERSION="1.0.0"
+
+# ─── Colors ───────────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m' # No Color
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+info()    { echo -e "${BLUE}ℹ${NC}  $*"; }
+success() { echo -e "${GREEN}✓${NC}  $*"; }
+warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
+error()   { echo -e "${RED}✗${NC}  $*"; }
+header()  { echo -e "\n${BOLD}${CYAN}── $* ──${NC}\n"; }
+
+ask() {
+    local prompt="$1" var="$2" default="${3:-}"
+    if [[ -n "$default" ]]; then
+        echo -e -n "${BOLD}$prompt${NC} ${DIM}[$default]${NC}: "
+    else
+        echo -e -n "${BOLD}$prompt${NC}: "
+    fi
+    read -r input
+    eval "$var=\"${input:-$default}\""
+}
+
+ask_secret() {
+    local prompt="$1" var="$2"
+    echo -e -n "${BOLD}$prompt${NC}: "
+    read -rs input
+    echo ""
+    eval "$var=\"$input\""
+}
+
+confirm() {
+    local prompt="$1"
+    echo -e -n "${BOLD}$prompt${NC} ${DIM}[y/N]${NC}: "
+    read -r answer
+    [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+get_root_dir() {
+    if [[ -f "$CCGRAM_ROOT_FILE" ]]; then
+        cat "$CCGRAM_ROOT_FILE"
+    else
+        echo "$HOME"
+    fi
+}
+
+is_running() {
+    tmux has-session -t "$CCGRAM_TMUX_SESSION" 2>/dev/null
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_setup() {
+    header "CCGram Setup Wizard"
+    echo "This wizard will guide you through the complete CCGram installation."
+    echo "You'll need: a Telegram account and ~10 minutes."
+    echo ""
+
+    # ── Step 1: Prerequisites ──
+    header "Step 1/7 — Prerequisites"
+
+    # Check Python
+    if command -v python3 &>/dev/null; then
+        local py_version
+        py_version=$(python3 --version 2>&1)
+        success "Python found: $py_version"
+    else
+        error "Python 3 not found. Install it first:"
+        echo "  macOS:   brew install python3"
+        echo "  Ubuntu:  sudo apt install python3"
+        echo "  WSL:     sudo apt install python3"
+        return 1
+    fi
+
+    # Check tmux
+    if command -v tmux &>/dev/null; then
+        success "tmux found: $(tmux -V)"
+    else
+        warn "tmux not found. Installing..."
+        if [[ "$(uname)" == "Darwin" ]]; then
+            brew install tmux
+        else
+            sudo apt-get update && sudo apt-get install -y tmux
+        fi
+        success "tmux installed"
+    fi
+
+    # Check Claude Code
+    if command -v claude &>/dev/null; then
+        success "Claude Code found: $(which claude)"
+    else
+        warn "Claude Code not found."
+        echo "  Install it later: https://docs.anthropic.com/en/docs/claude-code"
+        echo "  CCGram will work once Claude Code is installed."
+    fi
+
+    # ── Step 2: Install CCGram ──
+    header "Step 2/7 — Install CCGram"
+
+    local install_method=""
+    echo "Choose installation method:"
+    echo ""
+    echo "  1) uv   (recommended — fast, isolated)"
+    echo "  2) pipx (alternative — also isolated)"
+    echo "  3) pip  (simple — may need --break-system-packages)"
+    echo "  4) Skip (already installed)"
+    echo ""
+    ask "Choice" install_method "1"
+
+    case "$install_method" in
+        1)
+            if ! command -v uv &>/dev/null; then
+                info "Installing uv first..."
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+                export PATH="$HOME/.local/bin:$PATH"
+            fi
+            info "Installing CCGram from fork..."
+            uv tool install "git+${CCGRAM_FORK_REPO}" --force
+            success "CCGram installed via uv"
+            ;;
+        2)
+            if ! command -v pipx &>/dev/null; then
+                info "Installing pipx first..."
+                python3 -m pip install --user pipx
+                python3 -m pipx ensurepath
+            fi
+            info "Installing CCGram from fork..."
+            pipx install "git+${CCGRAM_FORK_REPO}" --force
+            success "CCGram installed via pipx"
+            ;;
+        3)
+            info "Installing CCGram from fork..."
+            pip install "git+${CCGRAM_FORK_REPO}" --break-system-packages 2>/dev/null \
+                || pip install "git+${CCGRAM_FORK_REPO}"
+            success "CCGram installed via pip"
+            ;;
+        4)
+            if command -v ccgram &>/dev/null; then
+                success "CCGram already installed: $(which ccgram)"
+            else
+                error "CCGram not found in PATH. Please install it first."
+                return 1
+            fi
+            ;;
+        *)
+            error "Invalid choice"
+            return 1
+            ;;
+    esac
+
+    # ── Step 3: Create Telegram Bot ──
+    header "Step 3/7 — Create Telegram Bot"
+
+    echo "You need a Telegram bot. Let's create one:"
+    echo ""
+    echo "  ${BOLD}1.${NC} Open Telegram and search for ${CYAN}@BotFather${NC}"
+    echo "  ${BOLD}2.${NC} Send ${CYAN}/newbot${NC}"
+    echo "  ${BOLD}3.${NC} Choose a ${BOLD}display name${NC} (e.g. 'My Claude Bot')"
+    echo "  ${BOLD}4.${NC} Choose a ${BOLD}username${NC} ending in 'bot' (e.g. 'my_claude_codebot')"
+    echo "  ${BOLD}5.${NC} BotFather will reply with a ${BOLD}token${NC} like: ${DIM}123456789:AAHfiqksKZ8...${NC}"
+    echo ""
+    echo "  ${BOLD}Then configure the bot:${NC}"
+    echo "  ${BOLD}6.${NC} Send ${CYAN}/mybots${NC} → select your bot → ${CYAN}Bot Settings${NC}"
+    echo "  ${BOLD}7.${NC} Go to ${CYAN}Groups & Channels${NC} → ${CYAN}Group Privacy${NC} → ${BOLD}Turn OFF${NC}"
+    echo "  ${BOLD}8.${NC} Go back to ${CYAN}Bot Settings${NC} → ${CYAN}Groups & Channels${NC} → ${CYAN}Edit Topics${NC} → ${BOLD}Enable${NC}"
+    echo ""
+
+    local bot_token=""
+    ask_secret "Paste your bot token here" bot_token
+    if [[ -z "$bot_token" ]]; then
+        error "Bot token is required"
+        return 1
+    fi
+    success "Bot token saved"
+
+    # ── Step 4: Get User ID ──
+    header "Step 4/7 — Your Telegram User ID"
+
+    echo "CCGram needs your Telegram user ID to restrict access."
+    echo ""
+    echo "  ${BOLD}1.${NC} Open Telegram and search for ${CYAN}@userinfobot${NC}"
+    echo "  ${BOLD}2.${NC} Send any message to it"
+    echo "  ${BOLD}3.${NC} It will reply with your ${BOLD}Id${NC} (a number like ${DIM}123456789${NC})"
+    echo ""
+
+    local user_id=""
+    ask "Paste your user ID" user_id
+    if [[ -z "$user_id" ]] || ! [[ "$user_id" =~ ^[0-9]+$ ]]; then
+        error "User ID must be a number"
+        return 1
+    fi
+    success "User ID saved: $user_id"
+
+    # ── Step 5: Create Telegram Group ──
+    header "Step 5/7 — Telegram Group"
+
+    echo "CCGram uses a Telegram group with Topics enabled."
+    echo ""
+    echo "  ${BOLD}1.${NC} Create a ${BOLD}new group${NC} in Telegram (or use an existing one)"
+    echo "  ${BOLD}2.${NC} Go to ${CYAN}Group Settings${NC} → ${CYAN}Topics${NC} → ${BOLD}Enable${NC}"
+    echo "  ${BOLD}3.${NC} ${BOLD}Add your bot${NC} to the group"
+    echo "  ${BOLD}4.${NC} ${BOLD}Promote the bot to Admin${NC} with these permissions:"
+    echo "     • Create Topics"
+    echo "     • Pin Messages"
+    echo ""
+    echo "  To get the Group ID:"
+    echo "  ${BOLD}5.${NC} Add ${CYAN}@RawDataBot${NC} to the group"
+    echo "  ${BOLD}6.${NC} It will reply with info — look for ${BOLD}\"Chat Id\"${NC}"
+    echo "     (a negative number like ${DIM}-1001234567890${NC})"
+    echo "  ${BOLD}7.${NC} ${BOLD}Remove @RawDataBot${NC} from the group after copying the ID"
+    echo ""
+
+    local group_id=""
+    ask "Paste your group ID (negative number)" group_id
+    if [[ -z "$group_id" ]]; then
+        error "Group ID is required"
+        return 1
+    fi
+    success "Group ID saved: $group_id"
+
+    # ── Step 6: Voice Transcription (Optional) ──
+    header "Step 6/7 — Voice Transcription (Optional)"
+
+    echo "CCGram can transcribe voice messages you send in Telegram"
+    echo "using Whisper (via Groq or OpenAI)."
+    echo ""
+
+    local whisper_provider="" groq_key="" whisper_autosend=""
+    if confirm "Enable voice transcription?"; then
+        echo ""
+        echo "  ${BOLD}Groq${NC} is recommended (fast, free tier available)."
+        echo ""
+        echo "  ${BOLD}1.${NC} Go to ${CYAN}https://console.groq.com/keys${NC}"
+        echo "  ${BOLD}2.${NC} Create an API key"
+        echo ""
+
+        ask_secret "Paste your Groq API key" groq_key
+        if [[ -n "$groq_key" ]]; then
+            whisper_provider="groq"
+            success "Groq API key saved"
+
+            echo ""
+            echo "  Auto-send: transcriptions are sent to the agent automatically"
+            echo "  without asking for confirmation."
+            if confirm "Enable auto-send?"; then
+                whisper_autosend="true"
+            else
+                whisper_autosend="false"
+            fi
+        else
+            warn "Skipping voice transcription (no API key)"
+        fi
+    else
+        info "Voice transcription disabled"
+    fi
+
+    # ── Step 7: Set Root Directory ──
+    header "Step 7/7 — Default Project Directory"
+
+    echo "When you create a new session from Telegram, the directory"
+    echo "browser will start in this folder."
+    echo ""
+
+    local root_dir=""
+    ask "Default directory" root_dir "$HOME"
+    root_dir="${root_dir/#\~/$HOME}"
+
+    if [[ ! -d "$root_dir" ]]; then
+        warn "Directory '$root_dir' doesn't exist."
+        if confirm "Create it?"; then
+            mkdir -p "$root_dir"
+            success "Created $root_dir"
+        else
+            root_dir="$HOME"
+            warn "Using $HOME as default"
+        fi
+    fi
+
+    # ── Save Configuration ──
+    header "Saving Configuration"
+
+    mkdir -p "$CCGRAM_CONFIG_DIR"
+
+    # Save .env
+    cat > "$CCGRAM_ENV_FILE" <<EOF
+# CCGram Configuration
+# Generated by ccgramctl setup on $(date '+%Y-%m-%d %H:%M:%S')
+# Edit with: ccgramctl env
+
+# Telegram Bot (required)
+TELEGRAM_BOT_TOKEN=$bot_token
+ALLOWED_USERS=$user_id
+CCGRAM_GROUP_ID=$group_id
+
+# Voice Transcription
+EOF
+
+    if [[ -n "$whisper_provider" ]]; then
+        cat >> "$CCGRAM_ENV_FILE" <<EOF
+CCGRAM_WHISPER_PROVIDER=$whisper_provider
+GROQ_API_KEY=$groq_key
+CCGRAM_VOICE_AUTOSEND=$whisper_autosend
+EOF
+    else
+        cat >> "$CCGRAM_ENV_FILE" <<EOF
+# CCGRAM_WHISPER_PROVIDER=groq
+# GROQ_API_KEY=
+# CCGRAM_VOICE_AUTOSEND=true
+EOF
+    fi
+
+    chmod 600 "$CCGRAM_ENV_FILE"
+    success "Configuration saved to $CCGRAM_ENV_FILE"
+
+    # Save root directory
+    echo "$root_dir" > "$CCGRAM_ROOT_FILE"
+    success "Root directory set to $root_dir"
+
+    # Install hooks
+    info "Installing Claude Code hooks..."
+    ccgram hook --install 2>/dev/null && success "Hooks installed" || warn "Hooks skipped (install Claude Code first)"
+
+    # ── Done ──
+    header "Setup Complete!"
+
+    echo "  Your CCGram is configured and ready to go."
+    echo ""
+    echo "  ${BOLD}Quick start:${NC}"
+    echo "    ccgramctl up        Start the daemon"
+    echo "    ccgramctl status    Check if it's running"
+    echo "    ccgramctl down      Stop the daemon"
+    echo ""
+    echo "  ${BOLD}Then open your Telegram group and create a new topic${NC}"
+    echo "  ${BOLD}to start a Claude Code session!${NC}"
+    echo ""
+
+    if confirm "Start the daemon now?"; then
+        cmd_up
+    fi
+}
+
+cmd_up() {
+    if is_running; then
+        warn "CCGram daemon is already running"
+        cmd_status
+        return 0
+    fi
+
+    if [[ ! -f "$CCGRAM_ENV_FILE" ]] || ! grep -q "TELEGRAM_BOT_TOKEN" "$CCGRAM_ENV_FILE" 2>/dev/null; then
+        error "CCGram not configured. Run 'ccgramctl setup' first."
+        return 1
+    fi
+
+    local root_dir
+    root_dir=$(get_root_dir)
+
+    # Source .env so tokens are available to ccgram
+    set -a
+    # shellcheck disable=SC1090
+    source "$CCGRAM_ENV_FILE"
+    set +a
+
+    info "Starting CCGram daemon..."
+    info "Root directory: $root_dir"
+
+    # Build the command that will run inside tmux
+    # We need to source .env inside tmux too, since tmux starts a fresh shell
+    local tmux_cmd="set -a; source '$CCGRAM_ENV_FILE'; set +a; cd '$root_dir' && exec ccgram"
+
+    tmux new-session -d -s "$CCGRAM_TMUX_SESSION" "bash -c \"$tmux_cmd\""
+
+    sleep 1
+    if is_running; then
+        success "CCGram daemon started"
+        echo ""
+        echo "  ${DIM}View logs:${NC}     ccgramctl logs"
+        echo "  ${DIM}Check status:${NC}  ccgramctl status"
+        echo "  ${DIM}Stop:${NC}          ccgramctl down"
+    else
+        error "Daemon failed to start. Check logs with: ccgramctl logs"
+        return 1
+    fi
+}
+
+cmd_down() {
+    if ! is_running; then
+        warn "CCGram daemon is not running"
+        return 0
+    fi
+
+    info "Stopping CCGram daemon..."
+    tmux kill-session -t "$CCGRAM_TMUX_SESSION" 2>/dev/null
+    success "CCGram daemon stopped"
+}
+
+cmd_status() {
+    header "CCGram Status"
+
+    # Daemon status
+    if is_running; then
+        success "Daemon: ${GREEN}running${NC}"
+    else
+        error "Daemon: ${RED}stopped${NC}"
+    fi
+
+    # Root directory
+    local root_dir
+    root_dir=$(get_root_dir)
+    info "Root directory: $root_dir"
+
+    # Config
+    if [[ -f "$CCGRAM_ENV_FILE" ]]; then
+        success "Config: $CCGRAM_ENV_FILE"
+    else
+        warn "Config: not found (run 'ccgramctl setup')"
+    fi
+
+    # tmux windows (active sessions)
+    if is_running; then
+        echo ""
+        info "Active tmux windows:"
+        tmux list-windows -t "$CCGRAM_TMUX_SESSION" -F "    #{window_index}: #{window_name} (#{pane_current_path})" 2>/dev/null || true
+    fi
+
+    # ccgram doctor (if available)
+    if command -v ccgram &>/dev/null; then
+        echo ""
+        info "Running ccgram doctor..."
+        ccgram doctor 2>&1 | sed 's/^/    /'
+    fi
+}
+
+cmd_sessions() {
+    if ! is_running; then
+        error "CCGram daemon is not running. Start with: ccgramctl up"
+        return 1
+    fi
+
+    header "Active Sessions"
+    tmux list-windows -t "$CCGRAM_TMUX_SESSION" -F "  #{window_index}. #{window_name}  →  #{pane_current_path}  (#{pane_current_command})" 2>/dev/null
+
+    echo ""
+    echo "  ${DIM}To kill a specific window:${NC}"
+    echo "    ccgramctl kill <window_number>"
+    echo ""
+    echo "  ${DIM}Tip: use /sessions in Telegram for interactive management${NC}"
+}
+
+cmd_kill_window() {
+    local window_id="${1:-}"
+    if [[ -z "$window_id" ]]; then
+        error "Usage: ccgramctl kill <window_number>"
+        echo "  Run 'ccgramctl sessions' to see window numbers."
+        return 1
+    fi
+
+    if ! is_running; then
+        error "CCGram daemon is not running"
+        return 1
+    fi
+
+    tmux kill-window -t "$CCGRAM_TMUX_SESSION:$window_id" 2>/dev/null \
+        && success "Window $window_id killed" \
+        || error "Window $window_id not found"
+}
+
+cmd_root() {
+    local new_root="${1:-}"
+
+    if [[ -z "$new_root" ]]; then
+        local current_root
+        current_root=$(get_root_dir)
+        info "Current root directory: $current_root"
+        echo ""
+        echo "  ${DIM}Usage: ccgramctl root ~/workspace/labs${NC}"
+        echo ""
+        echo "  ${DIM}The daemon must be restarted for changes to take effect:${NC}"
+        echo "    ccgramctl down && ccgramctl up"
+        return 0
+    fi
+
+    new_root="${new_root/#\~/$HOME}"
+
+    if [[ ! -d "$new_root" ]]; then
+        error "Directory '$new_root' does not exist"
+        return 1
+    fi
+
+    mkdir -p "$CCGRAM_CONFIG_DIR"
+    echo "$new_root" > "$CCGRAM_ROOT_FILE"
+    success "Root directory set to: $new_root"
+
+    if is_running; then
+        echo ""
+        warn "Restart the daemon for changes to take effect:"
+        echo "    ccgramctl down && ccgramctl up"
+    fi
+}
+
+cmd_logs() {
+    if ! is_running; then
+        error "CCGram daemon is not running. Start with: ccgramctl up"
+        return 1
+    fi
+
+    info "Attaching to CCGram daemon (press Ctrl+B then D to detach)..."
+    tmux attach -t "$CCGRAM_TMUX_SESSION"
+}
+
+cmd_env() {
+    if [[ ! -f "$CCGRAM_ENV_FILE" ]]; then
+        warn "No .env file found. Run 'ccgramctl setup' first."
+        return 1
+    fi
+
+    info "Opening $CCGRAM_ENV_FILE..."
+    "${EDITOR:-vim}" "$CCGRAM_ENV_FILE"
+
+    if is_running; then
+        echo ""
+        warn "Restart the daemon to apply changes:"
+        echo "    ccgramctl down && ccgramctl up"
+    fi
+}
+
+cmd_doctor() {
+    if ! command -v ccgram &>/dev/null; then
+        error "CCGram not installed. Run 'ccgramctl setup' first."
+        return 1
+    fi
+
+    # Source env so ccgram doctor can access tokens
+    if [[ -f "$CCGRAM_ENV_FILE" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "$CCGRAM_ENV_FILE"
+        set +a
+    fi
+
+    ccgram doctor
+}
+
+cmd_restart() {
+    cmd_down
+    sleep 1
+    cmd_up
+}
+
+cmd_upgrade() {
+    header "Upgrading CCGram"
+
+    if command -v uv &>/dev/null; then
+        info "Upgrading via uv..."
+        uv tool install "git+${CCGRAM_FORK_REPO}" --force
+    elif command -v pipx &>/dev/null; then
+        info "Upgrading via pipx..."
+        pipx install "git+${CCGRAM_FORK_REPO}" --force
+    else
+        info "Upgrading via pip..."
+        pip install "git+${CCGRAM_FORK_REPO}" --break-system-packages 2>/dev/null \
+            || pip install "git+${CCGRAM_FORK_REPO}"
+    fi
+
+    success "CCGram upgraded"
+
+    info "Reinstalling hooks..."
+    ccgram hook --install 2>/dev/null && success "Hooks updated" || warn "Hooks skipped"
+
+    if is_running; then
+        echo ""
+        warn "Restart the daemon to use the new version:"
+        echo "    ccgramctl restart"
+    fi
+}
+
+cmd_help() {
+    echo ""
+    echo -e "${BOLD}ccgramctl${NC} v${VERSION} — CCGram control panel"
+    echo ""
+    echo -e "${BOLD}USAGE${NC}"
+    echo "    ccgramctl <command> [args]"
+    echo ""
+    echo -e "${BOLD}DAEMON${NC}"
+    echo "    up              Start the daemon"
+    echo "    down            Stop the daemon"
+    echo "    restart         Restart the daemon"
+    echo "    status          Show daemon status and active sessions"
+    echo "    logs            Attach to daemon tmux (Ctrl+B, D to detach)"
+    echo ""
+    echo -e "${BOLD}SESSIONS${NC}"
+    echo "    sessions        List active tmux sessions/windows"
+    echo "    kill <n>        Kill a specific tmux window by number"
+    echo ""
+    echo -e "${BOLD}CONFIGURATION${NC}"
+    echo "    setup           Interactive first-time setup wizard"
+    echo "    env             Edit ~/.ccgram/.env in your editor"
+    echo "    root [path]     Show or change the default project directory"
+    echo "    doctor          Run ccgram diagnostics"
+    echo ""
+    echo -e "${BOLD}MAINTENANCE${NC}"
+    echo "    upgrade         Upgrade CCGram from fork"
+    echo "    help            Show this help"
+    echo "    version         Show version"
+    echo ""
+    echo -e "${BOLD}EXAMPLES${NC}"
+    echo "    ccgramctl setup                  # First-time setup"
+    echo "    ccgramctl up                     # Start daemon"
+    echo "    ccgramctl root ~/workspace/labs  # Change root directory"
+    echo "    ccgramctl restart                # Apply changes"
+    echo "    ccgramctl sessions               # See active sessions"
+    echo "    ccgramctl kill 2                 # Kill window 2"
+    echo ""
+    echo -e "${BOLD}TELEGRAM QUICK REFERENCE${NC}"
+    echo "    /sessions       List sessions (with kill buttons)"
+    echo "    /commands       Show provider commands"
+    echo "    /screenshot     Capture terminal as image"
+    echo "    /history        Browse message history"
+    echo ""
+}
+
+cmd_version() {
+    echo "ccgramctl v${VERSION}"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+main() {
+    local command="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$command" in
+        setup)      cmd_setup "$@" ;;
+        up|start)   cmd_up "$@" ;;
+        down|stop)  cmd_down "$@" ;;
+        restart)    cmd_restart "$@" ;;
+        status)     cmd_status "$@" ;;
+        sessions)   cmd_sessions "$@" ;;
+        kill)       cmd_kill_window "$@" ;;
+        root)       cmd_root "$@" ;;
+        logs)       cmd_logs "$@" ;;
+        env)        cmd_env "$@" ;;
+        doctor)     cmd_doctor "$@" ;;
+        upgrade)    cmd_upgrade "$@" ;;
+        help|-h|--help) cmd_help ;;
+        version|-v|--version) cmd_version ;;
+        *)
+            error "Unknown command: $command"
+            echo "  Run 'ccgramctl help' for available commands."
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
