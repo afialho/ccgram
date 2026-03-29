@@ -357,16 +357,15 @@ cmd_setup() {
     header "Step 6/7 — Voice Transcription (Optional)"
 
     echo "CCGram can transcribe voice messages you send in Telegram"
-    echo "using Whisper (via Groq or OpenAI)."
+    echo -e "using ${BOLD}Whisper via Groq${NC} — requires a free Groq API key."
+    echo ""
+    echo -e "  ${BOLD}To get a Groq API key (free):${NC}"
+    echo -e "  ${BOLD}1.${NC} Go to ${CYAN}https://console.groq.com/keys${NC}"
+    echo -e "  ${BOLD}2.${NC} Sign up / log in and create an API key"
     echo ""
 
     local whisper_provider="" groq_key="" whisper_autosend=""
-    if confirm "Enable voice transcription?"; then
-        echo ""
-        echo -e "  ${BOLD}Groq${NC} is recommended (fast, free tier available)."
-        echo ""
-        echo -e "  ${BOLD}1.${NC} Go to ${CYAN}https://console.groq.com/keys${NC}"
-        echo -e "  ${BOLD}2.${NC} Create an API key"
+    if confirm "Enable voice transcription? (requires Groq API key)"; then
         echo ""
 
         ask_secret "Paste your Groq API key" groq_key
@@ -395,9 +394,13 @@ cmd_setup() {
     echo "When you create a new session from Telegram, the directory"
     echo "browser will start in this folder."
     echo ""
+    echo -e "  ${DIM}Tip: press Tab to autocomplete the path${NC}"
+    echo ""
 
     local root_dir=""
-    ask "Default directory" root_dir "$HOME"
+    echo -e -n "${BOLD}Default directory${NC} ${DIM}[$HOME]${NC}: "
+    read -e -r -i "$HOME" root_dir
+    root_dir="${root_dir:-$HOME}"
     root_dir="${root_dir/#\~/$HOME}"
 
     if [[ ! -d "$root_dir" ]]; then
