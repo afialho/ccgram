@@ -54,7 +54,16 @@ ask_secret() {
     local prompt="$1" var="$2"
     echo -e -n "${BOLD}$prompt${NC}: "
     read -rs input
-    echo ""
+    if [[ -n "$input" ]]; then
+        # show masked dots so user knows something was entered (without revealing the value)
+        local dots=""
+        local len="${#input}"
+        local show=$(( len > 8 ? 8 : len ))
+        for (( i=0; i<show; i++ )); do dots+="●"; done
+        echo -e " ${DIM}${dots}${NC}"
+    else
+        echo ""
+    fi
     eval "$var=\"$input\""
 }
 
