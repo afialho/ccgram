@@ -178,16 +178,16 @@ cmd_setup() {
 
     echo "You need a Telegram bot. Let's create one:"
     echo ""
-    echo "  ${BOLD}1.${NC} Open Telegram and search for ${CYAN}@BotFather${NC}"
-    echo "  ${BOLD}2.${NC} Send ${CYAN}/newbot${NC}"
-    echo "  ${BOLD}3.${NC} Choose a ${BOLD}display name${NC} (e.g. 'My Claude Bot')"
-    echo "  ${BOLD}4.${NC} Choose a ${BOLD}username${NC} ending in 'bot' (e.g. 'my_claude_codebot')"
-    echo "  ${BOLD}5.${NC} BotFather will reply with a ${BOLD}token${NC} like: ${DIM}123456789:AAHfiqksKZ8...${NC}"
+    echo -e "  ${BOLD}1.${NC} Open Telegram and search for ${CYAN}@BotFather${NC}"
+    echo -e "  ${BOLD}2.${NC} Send ${CYAN}/newbot${NC}"
+    echo -e "  ${BOLD}3.${NC} Choose a ${BOLD}display name${NC} (e.g. 'My Claude Bot')"
+    echo -e "  ${BOLD}4.${NC} Choose a ${BOLD}username${NC} ending in 'bot' (e.g. 'my_claude_codebot')"
+    echo -e "  ${BOLD}5.${NC} BotFather will reply with a ${BOLD}token${NC} like: ${DIM}123456789:AAHfiqksKZ8...${NC}"
     echo ""
-    echo "  ${BOLD}Then configure the bot:${NC}"
-    echo "  ${BOLD}6.${NC} Send ${CYAN}/mybots${NC} → select your bot → ${CYAN}Bot Settings${NC}"
-    echo "  ${BOLD}7.${NC} Go to ${CYAN}Groups & Channels${NC} → ${CYAN}Group Privacy${NC} → ${BOLD}Turn OFF${NC}"
-    echo "  ${BOLD}8.${NC} Go back to ${CYAN}Bot Settings${NC} → ${CYAN}Groups & Channels${NC} → ${CYAN}Edit Topics${NC} → ${BOLD}Enable${NC}"
+    echo -e "  ${BOLD}Then configure the bot:${NC}"
+    echo -e "  ${BOLD}6.${NC} Send ${CYAN}/mybots${NC} → select your bot → ${CYAN}Bot Settings${NC}"
+    echo -e "  ${BOLD}7.${NC} Go to ${CYAN}Groups & Channels${NC} → ${CYAN}Group Privacy${NC} → ${BOLD}Turn OFF${NC}"
+    echo -e "  ${BOLD}8.${NC} Go back to ${CYAN}Bot Settings${NC} → ${CYAN}Groups & Channels${NC} → ${CYAN}Edit Topics${NC} → ${BOLD}Enable${NC}"
     echo ""
 
     local bot_token=""
@@ -203,9 +203,9 @@ cmd_setup() {
 
     echo "CCGram needs your Telegram user ID to restrict access."
     echo ""
-    echo "  ${BOLD}1.${NC} Open Telegram and search for ${CYAN}@userinfobot${NC}"
-    echo "  ${BOLD}2.${NC} Send any message to it"
-    echo "  ${BOLD}3.${NC} It will reply with your ${BOLD}Id${NC} (a number like ${DIM}123456789${NC})"
+    echo -e "  ${BOLD}1.${NC} Open Telegram and search for ${CYAN}@userinfobot${NC}"
+    echo -e "  ${BOLD}2.${NC} Send any message to it"
+    echo -e "  ${BOLD}3.${NC} It will reply with your ${BOLD}Id${NC} (a number like ${DIM}123456789${NC})"
     echo ""
 
     local user_id=""
@@ -221,18 +221,18 @@ cmd_setup() {
 
     echo "CCGram uses a Telegram group with Topics enabled."
     echo ""
-    echo "  ${BOLD}1.${NC} Create a ${BOLD}new group${NC} in Telegram (or use an existing one)"
-    echo "  ${BOLD}2.${NC} Go to ${CYAN}Group Settings${NC} → ${CYAN}Topics${NC} → ${BOLD}Enable${NC}"
-    echo "  ${BOLD}3.${NC} ${BOLD}Add your bot${NC} to the group"
-    echo "  ${BOLD}4.${NC} ${BOLD}Promote the bot to Admin${NC} with these permissions:"
+    echo -e "  ${BOLD}1.${NC} Create a ${BOLD}new group${NC} in Telegram (or use an existing one)"
+    echo -e "  ${BOLD}2.${NC} Go to ${CYAN}Group Settings${NC} → ${CYAN}Topics${NC} → ${BOLD}Enable${NC}"
+    echo -e "  ${BOLD}3.${NC} ${BOLD}Add your bot${NC} to the group"
+    echo -e "  ${BOLD}4.${NC} ${BOLD}Promote the bot to Admin${NC} with these permissions:"
     echo "     • Create Topics"
     echo "     • Pin Messages"
     echo ""
     echo "  To get the Group ID:"
-    echo "  ${BOLD}5.${NC} Add ${CYAN}@RawDataBot${NC} to the group"
-    echo "  ${BOLD}6.${NC} It will reply with info — look for ${BOLD}\"Chat Id\"${NC}"
-    echo "     (a negative number like ${DIM}-1001234567890${NC})"
-    echo "  ${BOLD}7.${NC} ${BOLD}Remove @RawDataBot${NC} from the group after copying the ID"
+    echo -e "  ${BOLD}5.${NC} Add ${CYAN}@RawDataBot${NC} to the group"
+    echo -e "  ${BOLD}6.${NC} It will reply with info — look for ${BOLD}\"Chat Id\"${NC}"
+    echo -e "     (a negative number like ${DIM}-1001234567890${NC})"
+    echo -e "  ${BOLD}7.${NC} ${BOLD}Remove @RawDataBot${NC} from the group after copying the ID"
     echo ""
 
     local group_id=""
@@ -253,10 +253,10 @@ cmd_setup() {
     local whisper_provider="" groq_key="" whisper_autosend=""
     if confirm "Enable voice transcription?"; then
         echo ""
-        echo "  ${BOLD}Groq${NC} is recommended (fast, free tier available)."
+        echo -e "  ${BOLD}Groq${NC} is recommended (fast, free tier available)."
         echo ""
-        echo "  ${BOLD}1.${NC} Go to ${CYAN}https://console.groq.com/keys${NC}"
-        echo "  ${BOLD}2.${NC} Create an API key"
+        echo -e "  ${BOLD}1.${NC} Go to ${CYAN}https://console.groq.com/keys${NC}"
+        echo -e "  ${BOLD}2.${NC} Create an API key"
         echo ""
 
         ask_secret "Paste your Groq API key" groq_key
@@ -350,13 +350,13 @@ EOF
 
     echo "  Your CCGram is configured and ready to go."
     echo ""
-    echo "  ${BOLD}Quick start:${NC}"
+    echo -e "  ${BOLD}Quick start:${NC}"
     echo "    ccgramctl up        Start the daemon"
     echo "    ccgramctl status    Check if it's running"
     echo "    ccgramctl down      Stop the daemon"
     echo ""
-    echo "  ${BOLD}Then open your Telegram group and create a new topic${NC}"
-    echo "  ${BOLD}to start a Claude Code session!${NC}"
+    echo -e "  ${BOLD}Then open your Telegram group and create a new topic${NC}"
+    echo -e "  ${BOLD}to start a Claude Code session!${NC}"
     echo ""
 
     if confirm "Start the daemon now?"; then
@@ -465,10 +465,10 @@ cmd_sessions() {
     tmux list-windows -t "$CCGRAM_TMUX_SESSION" -F "  #{window_index}. #{window_name}  →  #{pane_current_path}  (#{pane_current_command})" 2>/dev/null
 
     echo ""
-    echo "  ${DIM}To kill a specific window:${NC}"
+    echo -e "  ${DIM}To kill a specific window:${NC}"
     echo "    ccgramctl kill <window_number>"
     echo ""
-    echo "  ${DIM}Tip: use /sessions in Telegram for interactive management${NC}"
+    echo -e "  ${DIM}Tip: use /sessions in Telegram for interactive management${NC}"
 }
 
 cmd_kill_window() {
