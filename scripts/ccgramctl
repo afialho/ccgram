@@ -399,8 +399,9 @@ cmd_setup() {
 
     local root_dir=""
     # \001..\002 wraps tell readline to ignore ANSI escape widths (prevents cursor glitches)
+    # note: -i (pre-fill) requires bash 4+; macOS ships bash 3.2, so we skip it
     local rl_prompt=$'\001\033[1m\002Default directory\001\033[0m\002 \001\033[2m\002['"$HOME"$']\001\033[0m\002: '
-    read -e -r -i "$HOME" -p "$rl_prompt" root_dir
+    read -e -r -p "$rl_prompt" root_dir
     root_dir="${root_dir:-$HOME}"
     root_dir="${root_dir/#\~/$HOME}"
 
