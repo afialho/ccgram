@@ -150,6 +150,51 @@ is_running() {
     tmux has-session -t "$CCGRAM_TMUX_SESSION" 2>/dev/null
 }
 
+# Install ccgramctl itself to ~/.local/bin (called during setup)
+install_ctl_script() {
+    local target="$HOME/.local/bin/ccgramctl"
+    local self
+    self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+    mkdir -p "$HOME/.local/bin"
+
+    if [[ "$self" == "$target" ]]; then
+        info "ccgramctl already installed at $target"
+    else
+        cp "$self" "$target"
+        chmod +x "$target"
+        success "ccgramctl installed to $target"
+    fi
+
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        echo ""
+        warn "~/.local/bin is not in your PATH. Add this to your shell profile:"
+        echo -e "    ${CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    fi
+}
+
+# Download the latest ccgramctl from GitHub and replace the current script
+upgrade_ctl_script() {
+    local target
+    target="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+    local repo_path="${CCGRAM_FORK_REPO%.git}"
+    repo_path="${repo_path#https://github.com/}"
+    local raw_url="https://raw.githubusercontent.com/${repo_path}/main/scripts/ccgramctl"
+
+    info "Updating ccgramctl from GitHub..."
+    local tmp
+    tmp="$(mktemp)"
+    if curl -fsSL "$raw_url" -o "$tmp" 2>/dev/null; then
+        chmod +x "$tmp"
+        mv "$tmp" "$target"
+        success "ccgramctl updated at $target"
+    else
+        rm -f "$tmp"
+        warn "Could not download latest ccgramctl — check internet connection"
+    fi
+}
+
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 cmd_setup() {
@@ -295,6 +340,8 @@ cmd_setup() {
             return 1
             ;;
     esac
+
+    install_ctl_script
 
     # ── Step 3: Create Telegram Bot ──
     header "Step 3/7 — Create Telegram Bot"
@@ -701,6 +748,8 @@ cmd_restart() {
 
 cmd_upgrade() {
     header "Upgrading CCGram"
+
+    upgrade_ctl_script
 
     if command -v uv &>/dev/null; then
         info "Upgrading via uv..."
