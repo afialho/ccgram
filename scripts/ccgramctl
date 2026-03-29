@@ -52,6 +52,7 @@ ask() {
 
 ask_secret() {
     local prompt="$1" var="$2"
+    echo -e "  ${DIM}(paste or type, nothing will appear — press Enter when done)${NC}"
     echo -e -n "${BOLD}$prompt${NC}: "
     read -rs input
     echo ""  # newline after silent read (must come first, before any \r in input can cause issues)
