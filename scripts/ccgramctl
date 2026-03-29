@@ -54,15 +54,18 @@ ask_secret() {
     local prompt="$1" var="$2"
     echo -e -n "${BOLD}$prompt${NC}: "
     read -rs input
+    echo ""  # newline after silent read (must come first, before any \r in input can cause issues)
+    # strip carriage returns (common when copy-pasting from browser/terminal)
+    input="${input//$'\r'/}"
     if [[ -n "$input" ]]; then
-        # show masked dots so user knows something was entered (without revealing the value)
-        local dots=""
+        # show masked stars so user knows something was entered (without revealing the value)
+        local stars=""
         local len="${#input}"
         local show=$(( len > 8 ? 8 : len ))
-        for (( i=0; i<show; i++ )); do dots+="●"; done
-        echo -e " ${DIM}${dots}${NC}"
+        for (( i=0; i<show; i++ )); do stars+="*"; done
+        echo -e "  ${DIM}(${show} chars entered: ${stars})${NC}"
     else
-        echo ""
+        warn "(nothing entered — paste may have failed, try again)"
     fi
     eval "$var=\"$input\""
 }
