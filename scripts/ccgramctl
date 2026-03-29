@@ -52,21 +52,40 @@ ask() {
 
 ask_secret() {
     local prompt="$1" var="$2"
-    echo -e "  ${DIM}(paste or type, nothing will appear — press Enter when done)${NC}"
+    local input=""
     echo -e -n "${BOLD}$prompt${NC}: "
-    read -rs input
-    echo ""  # newline after silent read (must come first, before any \r in input can cause issues)
-    # strip carriage returns (common when copy-pasting from browser/terminal)
+    # read char-by-char: shows * per keystroke so user sees feedback while typing/pasting
+    while IFS= read -rsn1 char; do
+        if [[ -z "$char" ]]; then
+            break  # Enter key
+        fi
+        case "$char" in
+            $'\x7f'|$'\b')
+                # Backspace — erase last char and its star
+                if [[ -n "$input" ]]; then
+                    input="${input%?}"
+                    printf '\b \b'
+                fi
+                ;;
+            $'\r')
+                break
+                ;;
+            *)
+                input+="$char"
+                printf '*'
+                ;;
+        esac
+    done
+    echo ""
     input="${input//$'\r'/}"
     if [[ -n "$input" ]]; then
-        # show masked stars so user knows something was entered (without revealing the value)
-        local stars=""
         local len="${#input}"
         local show=$(( len > 8 ? 8 : len ))
+        local stars=""
         for (( i=0; i<show; i++ )); do stars+="*"; done
-        echo -e "  ${DIM}(${show} chars entered: ${stars})${NC}"
+        echo -e "  ${DIM}(${len} chars entered: ${stars})${NC}"
     else
-        warn "(nothing entered — paste may have failed, try again)"
+        warn "(nothing entered — try again)"
     fi
     eval "$var=\"$input\""
 }
