@@ -398,8 +398,9 @@ cmd_setup() {
     echo ""
 
     local root_dir=""
-    echo -e -n "${BOLD}Default directory${NC} ${DIM}[$HOME]${NC}: "
-    read -e -r -i "$HOME" root_dir
+    # \001..\002 wraps tell readline to ignore ANSI escape widths (prevents cursor glitches)
+    local rl_prompt=$'\001\033[1m\002Default directory\001\033[0m\002 \001\033[2m\002['"$HOME"$']\001\033[0m\002: '
+    read -e -r -i "$HOME" -p "$rl_prompt" root_dir
     root_dir="${root_dir:-$HOME}"
     root_dir="${root_dir/#\~/$HOME}"
 
