@@ -61,6 +61,66 @@ confirm() {
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
+# ─── OS Detection & Package Installation ──────────────────────────────────────
+
+detect_os() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "macos"
+    elif grep -qi microsoft /proc/version 2>/dev/null; then
+        echo "wsl"
+    elif command -v apt-get &>/dev/null; then
+        echo "debian"
+    elif command -v dnf &>/dev/null; then
+        echo "fedora"
+    elif command -v pacman &>/dev/null; then
+        echo "arch"
+    elif command -v zypper &>/dev/null; then
+        echo "opensuse"
+    else
+        echo "unknown"
+    fi
+}
+
+ensure_brew() {
+    if ! command -v brew &>/dev/null; then
+        info "Installing Homebrew..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+            || { error "Homebrew installation failed."; return 1; }
+        # Add brew to PATH for Apple Silicon
+        if [[ -f /opt/homebrew/bin/brew ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        fi
+    fi
+}
+
+# pkg_install <macos-pkg> <apt-pkg> <dnf-pkg> <pacman-pkg> <zypper-pkg>
+pkg_install() {
+    local pkg_macos="$1" pkg_apt="$2" pkg_dnf="$3" pkg_pacman="$4" pkg_zypper="$5"
+    local os
+    os=$(detect_os)
+    case "$os" in
+        macos)
+            ensure_brew || return 1
+            brew install "$pkg_macos" || return 1
+            ;;
+        wsl|debian)
+            sudo apt-get update -qq && sudo apt-get install -y "$pkg_apt" || return 1
+            ;;
+        fedora)
+            sudo dnf install -y "$pkg_dnf" || return 1
+            ;;
+        arch)
+            sudo pacman -S --noconfirm "$pkg_pacman" || return 1
+            ;;
+        opensuse)
+            sudo zypper install -y "$pkg_zypper" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 get_root_dir() {
     if [[ -f "$CCGRAM_ROOT_FILE" ]]; then
         cat "$CCGRAM_ROOT_FILE"
@@ -84,39 +144,85 @@ cmd_setup() {
     # ── Step 1: Prerequisites ──
     header "Step 1/7 — Prerequisites"
 
-    # Check Python
+    local os
+    os=$(detect_os)
+    info "Detected system: $os"
+    echo ""
+
+    # ── Python ──
     if command -v python3 &>/dev/null; then
-        local py_version
-        py_version=$(python3 --version 2>&1)
-        success "Python found: $py_version"
+        success "Python: $(python3 --version)"
     else
-        error "Python 3 not found. Install it first:"
-        echo "  macOS:   brew install python3"
-        echo "  Ubuntu:  sudo apt install python3"
-        echo "  WSL:     sudo apt install python3"
-        return 1
-    fi
-
-    # Check tmux
-    if command -v tmux &>/dev/null; then
-        success "tmux found: $(tmux -V)"
-    else
-        warn "tmux not found. Installing..."
-        if [[ "$(uname)" == "Darwin" ]]; then
-            brew install tmux
+        warn "Python 3 not found."
+        if confirm "Install Python 3?"; then
+            if pkg_install python3 python3 python3 python python3; then
+                command -v python3 &>/dev/null \
+                    && success "Python installed: $(python3 --version)" \
+                    || { error "Python install failed"; return 1; }
+            else
+                error "Could not install Python 3 automatically."
+                case "$os" in
+                    macos)      echo "  Run: brew install python3" ;;
+                    wsl|debian) echo "  Run: sudo apt install python3" ;;
+                    fedora)     echo "  Run: sudo dnf install python3" ;;
+                    arch)       echo "  Run: sudo pacman -S python" ;;
+                    *)          echo "  See: https://www.python.org/downloads/" ;;
+                esac
+                return 1
+            fi
         else
-            sudo apt-get update && sudo apt-get install -y tmux
+            error "Python 3 is required. Aborting."
+            return 1
         fi
-        success "tmux installed"
     fi
 
-    # Check Claude Code
+    # ── tmux ──
+    if command -v tmux &>/dev/null; then
+        success "tmux: $(tmux -V)"
+    else
+        warn "tmux not found."
+        if confirm "Install tmux?"; then
+            if pkg_install tmux tmux tmux tmux tmux; then
+                command -v tmux &>/dev/null \
+                    && success "tmux installed: $(tmux -V)" \
+                    || { error "tmux install failed"; return 1; }
+            else
+                error "Could not install tmux automatically."
+                case "$os" in
+                    macos)      echo "  Run: brew install tmux" ;;
+                    wsl|debian) echo "  Run: sudo apt install tmux" ;;
+                    fedora)     echo "  Run: sudo dnf install tmux" ;;
+                    arch)       echo "  Run: sudo pacman -S tmux" ;;
+                    *)          echo "  See: https://github.com/tmux/tmux/wiki/Installing" ;;
+                esac
+                return 1
+            fi
+        else
+            error "tmux is required. Aborting."
+            return 1
+        fi
+    fi
+
+    # ── Claude Code ──
     if command -v claude &>/dev/null; then
-        success "Claude Code found: $(which claude)"
+        success "Claude Code: $(claude --version 2>/dev/null | head -1 || echo 'found')"
     else
         warn "Claude Code not found."
-        echo "  Install it later: https://docs.anthropic.com/en/docs/claude-code"
-        echo "  CCGram will work once Claude Code is installed."
+        echo "  (Optional — required only for the Claude provider)"
+        echo ""
+        if confirm "Install Claude Code now?"; then
+            if command -v npm &>/dev/null; then
+                npm install -g @anthropic-ai/claude-code \
+                    && success "Claude Code installed" \
+                    || warn "Install failed. Try: npm install -g @anthropic-ai/claude-code"
+            else
+                warn "npm not found. Install Node.js first, then run:"
+                echo -e "    ${CYAN}npm install -g @anthropic-ai/claude-code${NC}"
+                echo -e "  Or follow: ${CYAN}https://docs.anthropic.com/en/docs/claude-code${NC}"
+            fi
+        else
+            info "Skipped. CCGram also supports Codex, Gemini, and Shell providers."
+        fi
     fi
 
     # ── Step 2: Install CCGram ──
@@ -398,9 +504,9 @@ cmd_up() {
     if is_running; then
         success "CCGram daemon started"
         echo ""
-        echo "  ${DIM}View logs:${NC}     ccgramctl logs"
-        echo "  ${DIM}Check status:${NC}  ccgramctl status"
-        echo "  ${DIM}Stop:${NC}          ccgramctl down"
+        echo -e "  ${DIM}View logs:${NC}     ccgramctl logs"
+        echo -e "  ${DIM}Check status:${NC}  ccgramctl status"
+        echo -e "  ${DIM}Stop:${NC}          ccgramctl down"
     else
         error "Daemon failed to start. Check logs with: ccgramctl logs"
         return 1
@@ -497,9 +603,9 @@ cmd_root() {
         current_root=$(get_root_dir)
         info "Current root directory: $current_root"
         echo ""
-        echo "  ${DIM}Usage: ccgramctl root ~/workspace/labs${NC}"
+        echo -e "  ${DIM}Usage: ccgramctl root ~/workspace/labs${NC}"
         echo ""
-        echo "  ${DIM}The daemon must be restarted for changes to take effect:${NC}"
+        echo -e "  ${DIM}The daemon must be restarted for changes to take effect:${NC}"
         echo "    ccgramctl down && ccgramctl up"
         return 0
     fi
