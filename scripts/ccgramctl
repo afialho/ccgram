@@ -43,6 +43,10 @@ ask() {
         echo -e -n "${BOLD}$prompt${NC}: "
     fi
     read -r input
+    # strip leading/trailing whitespace and carriage returns (common when copy-pasting)
+    input="${input#"${input%%[![:space:]]*}"}"
+    input="${input%"${input##*[![:space:]]}"}"
+    input="${input//$'\r'/}"
     eval "$var=\"${input:-$default}\""
 }
 
@@ -317,7 +321,7 @@ cmd_setup() {
     local user_id=""
     ask "Paste your user ID" user_id
     if [[ -z "$user_id" ]] || ! [[ "$user_id" =~ ^[0-9]+$ ]]; then
-        error "User ID must be a number"
+        error "User ID must be a number (got: '${user_id}')"
         return 1
     fi
     success "User ID saved: $user_id"
